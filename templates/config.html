@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>电影管理配置</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css">
+</head>
+<body>
+<div class="container mt-4">
+    <h2>电影管理配置</h2>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    <form method="post">
+        <div class="form-group">
+            <label for="download_dir">下载目录（硬链接源目录）</label>
+            <input type="text" class="form-control" id="download_dir" name="download_dir" value="{{ config.download_dir }}">
+            <small class="form-text text-muted">例如：/nas/download</small>
+        </div>
+        <div class="form-group">
+            <label for="target_dir">电影目标目录</label>
+            <input type="text" class="form-control" id="target_dir" name="target_dir" value="{{ config.target_dir }}">
+            <small class="form-text text-muted">例如：/nas/movies</small>
+        </div>
+        <div class="form-group">
+            <label for="tmdb_api_key">TMDB API Key</label>
+            <input type="text" class="form-control" id="tmdb_api_key" name="tmdb_api_key" value="{{ config.tmdb_api_key }}">
+            <small class="form-text text-muted">用于抓取电影元数据，可选TinyMediaManager扩展</small>
+        </div>
+        <div class="form-group">
+            <label for="file_suffixes">文件后缀过滤（逗号分隔）</label>
+            <input type="text" class="form-control" id="file_suffixes" name="file_suffixes" value="{{ config.file_suffixes }}">
+            <small class="form-text text-muted">例如：.mp4,.mkv,.avi,.mov</small>
+        </div>
+        <div class="form-group">
+            <label for="rename_rule">重命名规则</label>
+            <input type="text" class="form-control" id="rename_rule" name="rename_rule" value="{{ config.rename_rule }}">
+            <small class="form-text text-muted">
+                可使用变量：{title}、{year}。示例：{title} ({year})
+            </small>
+        </div>
+        <div class="form-group">
+            <label for="max_threads">并发线程数</label>
+            <input type="number" class="form-control" id="max_threads" name="max_threads" value="{{ config.max_threads }}">
+            <small class="form-text text-muted">设置扫描和处理电影的并发线程数</small>
+        </div>
+        <div class="form-group">
+            <label for="schedule_interval">定时扫描间隔（分钟）</label>
+            <input type="number" class="form-control" id="schedule_interval" name="schedule_interval" value="{{ config.schedule_interval }}">
+            <small class="form-text text-muted">设置定时任务扫描间隔，0 表示不启用</small>
+        </div>
+        <button type="submit" class="btn btn-primary">保存配置</button>
+    </form>
+    <br>
+    <a href="{{ url_for('run_process') }}" class="btn btn-success">立即扫描 &amp; 处理电影</a>
+    <br><br>
+    <h4>日志（movie_manager.log）</h4>
+    <p>日志文件请在容器内查看，或映射日志文件目录到宿主。</p>
+</div>
+</body>
+</html>
