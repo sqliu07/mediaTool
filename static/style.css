@@ -1,0 +1,105 @@
+.progress-container {
+  width: 100%;
+  height: 20px;
+  background-color: #f0f0f0;
+  border-radius: 10px;
+  margin: 20px 0;
+  overflow: hidden;
+}
+
+.progress {
+  height: 25px;
+  font-size: 14px;
+}
+
+.error-container {
+  background: #f8f9fa;
+  padding: 15px;
+  border-radius: 4px;
+  border: 1px solid #dee2e6;
+}
+
+.error-container li {
+  border-bottom: 1px solid #dee2e6;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.error-container li:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+#result {
+  margin: 20px 0;
+}
+
+#result p {
+  margin: 5px 0;
+}
+
+.alert {
+  padding: 15px;
+  margin: 15px 0;
+  border-radius: 4px;
+}
+
+.alert-success {
+  background-color: #dff0d8;
+  border-color: #d6e9c6;
+  color: #3c763d;
+}
+
+.alert-warning {
+  background-color: #fcf8e3;
+  border-color: #faebcc;
+  color: #8a6d3b;
+}
+
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.task-section, .config-list-section {
+  padding: 20px;
+  border-bottom: 1px solid #ddd;
+}
+
+.task-section {
+  flex: 0 0 40%;
+  overflow-y: auto;
+}
+
+.config-list-section {
+  flex: 1;
+  background: #f8f9fa;
+}
+
+.side-panel {
+  z-index: 1000;
+  padding: 20px;
+}
+
+.path-mapping {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.side-panel {
+  position: fixed;
+  right: -400px;
+  top: 0;
+  width: 400px;
+  height: 100%;
+  background: white;
+  transition: right 0.3s;
+  box-shadow: -2px 0 5px rgba(0,0,0,0.1);
+}
+
+.side-panel.active {
+  right: 0;
+}

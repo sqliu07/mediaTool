@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>电影配置管理</title>
+  <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css">
+  <style>
+    #editor-panel { position: fixed; top: 0; right: -450px; width: 450px; height: 100%; background: #fff;
+      border-left: 1px solid #ccc; padding: 20px; transition: right .3s; overflow-y: auto; z-index:1000;
+    }
+    #editor-panel.open { right: 0; }
+  </style>
+</head>
+<body>
+<div class="container mt-4">
+  <h3>电影任务执行</h3>
+  <button id="btn-run" class="btn btn-success mb-3">立即执行任务</button>
+  <hr>
+  <div class="d-flex justify-content-between align-items-center">
+    <h4>配置列表</h4>
+    <button id="btn-new" class="btn btn-primary btn-sm">➕ 新建配置</button>
+  </div>
+  <ul id="config-list" class="list-group mt-2">
+    {% for cfg in configs %}
+    <li class="list-group-item d-flex justify-content-between align-items-center">
+      {{ cfg.name }}
+      <div>
+        <button class="btn btn-sm btn-outline-secondary mr-2" onclick="editConfig('{{ cfg.name }}')">编辑</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="deleteConfig('{{ cfg.name }}')">删除</button>
+      </div>
+    </li>
+    {% else %}
+    <li class="list-group-item">暂无配置</li>
+    {% endfor %}
+  </ul>
+</div>
+
+<!-- 侧边编辑面板 -->
+<div id="editor-panel">
+  <h5>配置编辑</h5>
+  <form id="cfg-form" onsubmit="saveConfig(event)">
+    <div class="form-group">
+      <label>配置名称</label>
+      <input type="text" id="cfg-name" class="form-control" required>
+    </div>
+    <div class="form-group">
+      <label>TMDB API Key</label>
+      <input type="text" id="cfg-tmdb-api-key" class="form-control" placeholder="请输入 TMDB API Key">
+    </div>
+    <div id="path-mappings"></div>
+    <button type="button" class="btn btn-sm btn-outline-primary mb-2" onclick="addPath()">➕ 添加路径映射</button>
+    <div class="form-group">
+      <label>文件后缀（如 .mp4,.mkv）</label>
+      <input type="text" id="cfg-suffixes" class="form-control">
+    </div>
+    <div class="form-group">
+      <label>重命名规则</label>
+      <input type="text" id="cfg-rename" class="form-control" placeholder="{title}.{year}{ext}">
+      <small class="form-text text-muted">可用占位符：{title},{year},{season},{episode},{ext}</small>
+    </div>
+    <div class="form-group">
+      <label>定时扫描间隔（分钟，0=不启用）</label>
+      <input type="number" id="cfg-interval" class="form-control" value="0" min="0">
+    </div>
+    <button class="btn btn-success">保存</button>
+    <button type="button" class="btn btn-secondary ml-2" onclick="closeEditor()">取消</button>
+  </form>
+</div>
+
+<!-- 进度对话框 -->
+<div class="modal fade" id="progressModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">任务进度</h5>
+      </div>
+      <div class="modal-body">
+        <div class="progress mb-3">
+          <div id="progress-bar" class="progress-bar" style="width:0%">0%</div>
+        </div>
+        <div id="progress-stats" class="mb-3">
+          <p id="progress-text" class="mb-2">0 / 0</p>
+          <p class="mb-2">成功：<span id="success-count" class="text-success">0</span></p>
+          <p class="mb-2">失败：<span id="failed-count" class="text-danger">0</span></p>
+        </div>
+        </div>
+        <div id="complete-message" class="alert mt-3" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/js/bootstrap.bundle.min.js"></script>
+<script>
+// 打开/关闭编辑面板
+function openEditor() { $('#editor-panel').addClass('open'); }
+function closeEditor(){ $('#editor-panel').removeClass('open'); }
+
+// 增加一行路径映射
+function addPath(src='', dst='') {
+  const idx = Date.now();
+  $('#path-mappings').append(`
+    <div class="form-row mb-2" data-idx="${idx}">
+      <div class="col"><input class="form-control" placeholder="源路径" value="${src}"></div>
+      <div class="col"><input class="form-control" placeholder="目标路径" value="${dst}"></div>
+      <div class="col-auto">
+        <button type="button" class="btn btn-danger btn-sm" onclick="$(this).closest('.form-row').remove()">✖</button>
+      </div>
+    </div>`);
+}
+
+// 删除配置
+function deleteConfig(name){
+  if(!confirm(`确认删除配置 "${name}" 吗？`)) return;
+  fetch(`/delete_config/${name}`,{method:'DELETE'})
+    .then(r=>r.json()).then(j=>{
+      alert(j.message);
+      location.reload();
+    });
+}
+
+// 点击“新建”
+$('#btn-new').click(()=>{
+  $('#cfg-form')[0].reset();
+  $('#path-mappings').empty();
+  addPath();
+  openEditor();
+});
+
+// 编辑已有配置
+function editConfig(name){
+  fetch(`/get_config/${name}`)
+    .then(r=>r.json())
+    .then(cfg=>{
+      openEditor();
+      $('#cfg-name').val(cfg.name);
+      $('#cfg-tmdb-api-key').val(cfg.tmdb_api_key || "");
+      $('#cfg-suffixes').val(cfg.file_suffixes);
+      $('#cfg-rename').val(cfg.rename_rule);
+      $('#cfg-interval').val(cfg.schedule_interval || 0);
+      $('#path-mappings').empty();
+      cfg.paths.forEach(p=> addPath(p.source,p.target));
+    });
+}
+
+// 保存配置
+function saveConfig(e){
+  e.preventDefault();
+  const name = $('#cfg-name').val().trim();
+  const tmdb_api_key = $('#cfg-tmdb-api-key').val().trim();
+  const suffixes = $('#cfg-suffixes').val().trim();
+  const rename_rule = $('#cfg-rename').val().trim();
+  const schedule_interval = parseInt($('#cfg-interval').val(),10) || 0;
+  const paths = [];
+  $('#path-mappings .form-row').each(function(){
+    const src = $(this).find('input').eq(0).val().trim();
+    const dst = $(this).find('input').eq(1).val().trim();
+    paths.push({source: src, target: dst});
+  });
+  fetch('/save_config',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, tmdb_api_key: tmdb_api_key, file_suffixes: suffixes, paths, rename_rule, schedule_interval})
+  })
+  .then(r=>r.json())
+  .then(j=>{
+    alert(j.message);
+    closeEditor();
+    location.reload();
+  });
+}
+
+// 启动任务并监控进度
+$('#btn-run').click(()=>{
+  // 重置进度显示
+  $('#progress-bar').css('width','0%').text('0%');
+  $('#progress-text').text('0 / 0');
+  $('#success-count').text('0');
+  $('#failed-count').text('0');
+  $('#error-details').empty();
+  $('#error-list').hide();
+  $('#complete-message').hide();
+  
+  $('#progressModal').modal('show');
+  fetch('/run_task',{method:'POST'})
+    .then(()=>{
+      let lastProcessed = 0;
+      // 每秒刷新一次进度
+      const timer = setInterval(()=>{
+        fetch('/progress').then(r=>r.json()).then(p=>{
+          if(p.processed >= lastProcessed) {
+            const pct = p.total>0 ? Math.floor(p.processed*100/p.total) : 0;
+            $('#progress-bar').css('width',pct+'%').text(pct+'%');
+            $('#progress-text').text(`${p.processed} / ${p.total}`);
+            $('#success-count').text(p.success || 0);
+            $('#failed-count').text(p.failed || 0);
+            
+            // 显示错误详情
+            if(p.errors && p.errors.length > 0) {
+              const errorList = $('#error-details');
+              errorList.empty();
+              p.errors.forEach(error => {
+                errorList.append(`
+                  <li class="text-danger mb-2">
+                    <strong>${error.file}</strong><br>
+                    <small>${error.message}</small>
+                  </li>
+                `);
+              });
+              $('#error-list').show();
+            }
+            
+            lastProcessed = p.processed;
+          }
+          
+          if(p.completed || (p.processed >= p.total && p.total > 0)){
+            clearInterval(timer);
+            // 显示完成消息
+            const failed = p.failed || 0;
+            const msgDiv = $('#complete-message');
+            const logPath = p.log_path || '/logs/movie_manager.log';
+            
+            if(failed === 0){
+              msgDiv.removeClass('alert-warning').addClass('alert-success')
+                   .html('✅ 任务完成！所有文件处理成功。');
+            } else {
+              msgDiv.removeClass('alert-success').addClass('alert-warning')
+                   .html(`⚠️ 任务完成！${failed}个文件处理失败。<br>
+                         详细错误信息已保存至：<br><code class="bg-light p-1">${logPath}</code>`);
+            }
+            msgDiv.show();
+          }
+        });
+      }, 1000);
+    });
+});
+</script>
+</body>
+</html>

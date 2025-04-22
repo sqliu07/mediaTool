@@ -7,7 +7,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 # 安装依赖，包括 Flask、requests 和 APScheduler
-RUN pip install --no-cache-dir -r requirements.txt
+RUN mkdir -p /app/logs pip install --no-cache-dir -r requirements.txt
 
 # 拷贝项目代码
 COPY . .
