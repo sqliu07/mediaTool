@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>电影配置管理</title>
+  <title>Movie Parser</title>
   <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css">
   <style>
     #editor-panel { position: fixed; top: 0; right: -450px; width: 450px; height: 100%; background: #fff;
@@ -13,7 +13,7 @@
 </head>
 <body>
 <div class="container mt-4">
-  <h3>电影任务执行</h3>
+  <h3>执行任务</h3>
   <button id="btn-run" class="btn btn-success mb-3">立即执行任务</button>
   <hr>
   <div class="d-flex justify-content-between align-items-center">
@@ -44,6 +44,13 @@
       <input type="text" id="cfg-name" class="form-control" required>
     </div>
     <div class="form-group">
+      <label>文件类型</label>
+      <select id="cfg-file-type" class="form-control">
+        <option value="movie">电影</option>
+        <option value="tv_show">电视剧</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label>TMDB API Key</label>
       <input type="text" id="cfg-tmdb-api-key" class="form-control" placeholder="请输入 TMDB API Key">
     </div>
@@ -54,8 +61,8 @@
       <input type="text" id="cfg-suffixes" class="form-control">
     </div>
     <div class="form-group">
-      <label>重命名规则</label>
-      <input type="text" id="cfg-rename" class="form-control" placeholder="{title}.{year}{ext}">
+      <label>重命名规则（如{title}.{year}）</label>
+      <input type="text" id="cfg-rename" class="form-control" placeholder="">
       <small class="form-text text-muted">可用占位符：{title},{year},{season},{episode},{ext}</small>
     </div>
     <div class="form-group">
@@ -123,6 +130,7 @@ function deleteConfig(name){
 // 点击“新建”
 $('#btn-new').click(()=>{
   $('#cfg-form')[0].reset();
+  $('#cfg-file-type').val('movie'); // 新建时默认为电影
   $('#path-mappings').empty();
   addPath();
   openEditor();
@@ -135,6 +143,7 @@ function editConfig(name){
     .then(cfg=>{
       openEditor();
       $('#cfg-name').val(cfg.name);
+      $('#cfg-file-type').val(cfg.file_type || 'movie'); // 加载文件类型，默认为 movie
       $('#cfg-tmdb-api-key').val(cfg.tmdb_api_key || "");
       $('#cfg-suffixes').val(cfg.file_suffixes);
       $('#cfg-rename').val(cfg.rename_rule);
@@ -148,6 +157,7 @@ function editConfig(name){
 function saveConfig(e){
   e.preventDefault();
   const name = $('#cfg-name').val().trim();
+  const file_type = $('#cfg-file-type').val(); // 获取文件类型
   const tmdb_api_key = $('#cfg-tmdb-api-key').val().trim();
   const suffixes = $('#cfg-suffixes').val().trim();
   const rename_rule = $('#cfg-rename').val().trim();
@@ -160,7 +170,8 @@ function saveConfig(e){
   });
   fetch('/save_config',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name, tmdb_api_key: tmdb_api_key, file_suffixes: suffixes, paths, rename_rule, schedule_interval})
+    // 在发送的数据中包含 file_type
+    body: JSON.stringify({name, file_type, tmdb_api_key: tmdb_api_key, file_suffixes: suffixes, paths, rename_rule, schedule_interval})
   })
   .then(r=>r.json())
   .then(j=>{
