@@ -1,19 +1,23 @@
 FROM python:3.9-slim
 
-# 设置工作目录
 WORKDIR /app
 
-# 将依赖文件拷贝到容器中
+# 创建非 root 用户和组
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+
+# 创建必要的目录并设置权限
+RUN mkdir -p /app/logs /app/configs && chown -R appuser:appgroup /app
+
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 安装依赖，包括 Flask、requests 和 APScheduler
-RUN mkdir -p /app/logs pip install --no-cache-dir -r requirements.txt
-
-# 拷贝项目代码
 COPY . .
+# 确保复制后的文件权限正确
+RUN chown -R appuser:appgroup /app
 
-# 暴露端口（这里以5000端口为例）
-EXPOSE 5000
+# 切换到非 root 用户
+USER appuser
 
-# 启动 Flask 应用
+EXPOSE 8082
+
 CMD ["python", "app.py"]

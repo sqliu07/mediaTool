@@ -345,4 +345,4 @@ if __name__ == "__main__":
             # 使用第一个配置的间隔来设置调度频率
             initial_interval = initial_configs[0].get("schedule_interval", 0)
         start_scheduler(initial_interval)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=8082, debug=True)
