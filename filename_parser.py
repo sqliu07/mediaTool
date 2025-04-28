@@ -43,7 +43,7 @@ def parse_filename(filename):
 
     # 尝试匹配电影格式 (包含年份)
     # 改进正则，确保年份是末尾的数字，或者被括号包围
-    movie_match = re.search(r'^(.*?)(?:[\s\._-]*\((\d{4})\)|[\s\._-](\d{4}))[\s\._-]*$', name)
+    movie_match = re.search(r'^(.*?)[\s\._-]*[\(\[]?(\d{4})[\)\]]?', name)
     if movie_match:
         title = movie_match.group(1).strip()
         # 年份可能是 group(2) 或 group(3)

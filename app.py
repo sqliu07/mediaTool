@@ -5,6 +5,7 @@ from threading import Thread
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from movie_processor import process_movies
+from metadata_fetcher import check_tmdb_connection
 from datetime import datetime
 
 CONFIG_FILE = "configs/config.json"
@@ -64,13 +65,53 @@ def save_config(configs):
 scheduler = BackgroundScheduler()
 scheduler.start()
 
+# --- 新增的辅助函数 ---
+# --- 修改后的辅助函数 ---
+def _check_tmdb_connectivity(configs, task_type="任务"):
+    """
+    检查 TMDB 连接性。
+    遍历配置找到第一个 API Key 并检查连接。
+    成功则正常返回，失败则抛出相应的 TMDBError 异常。
+    """
+    first_api_key = None
+    for cfg in configs:
+        if cfg.get("tmdb_api_key"):
+            first_api_key = cfg["tmdb_api_key"]
+            break
+
+    if first_api_key:
+        logger.info(f"{task_type}：检查 TMDB 连接...")
+        if not check_tmdb_connection(first_api_key):
+            error_msg = f"{task_type}：无法连接到 TMDB，任务已终止。你可以配置hosts或代理以解决问题。"
+            logger.error(error_msg)
+            raise TMDBConnectionError(error_msg) # <--- 抛出连接错误异常
+        else:
+            logger.info(f"{task_type}：TMDB 连接检查通过。")
+            # 成功，不返回任何值 (隐式返回 None)
+    else:
+        error_msg = f"{task_type}：未配置 TMDB API Key，任务终止。"
+        logger.error(error_msg)
+        raise TMDBApiKeyMissingError(error_msg) # <--- 抛出 Key 缺失异常
+
+
 def run_scheduled_task():
     """后台定时执行的任务，处理所有配置"""
     logger.info("定时任务开始执行...")
     configs = load_config()
     if not configs:
-        logger.info("没有找到配置，任务跳过。")
+        logger.info("没有找到配置，定时任务跳过。")
         return
+
+    try:
+        # --- 使用辅助函数检查 TMDB 连接 ---
+        _check_tmdb_connectivity(configs, task_type="定时任务")
+        # --- 检查通过，继续执行 ---
+    except TMDBError as e: # 捕获所有 TMDB 相关的错误
+        # 日志已在 _check_tmdb_connectivity 中记录
+        logger.warning(f"定时任务因 TMDB 检查失败而终止: {e}")
+        return # 终止任务
+
+    # --- 检查结束 ---
 
     # 遍历所有配置并执行处理 (没有进度回调)
     for config_item in configs:
@@ -143,6 +184,19 @@ def run_process_wrapper(cfg):
     #     process_movies(cfg, progress_callback=progress_cb)
     # except Exception as e:
     #     logger.error(f"处理电影时出错：{e}")
+
+# --- 自定义异常 ---
+class TMDBError(Exception):
+    """Base exception for TMDB related errors."""
+    pass
+
+class TMDBConnectionError(TMDBError):
+    """Raised when connection to TMDB fails."""
+    pass
+
+class TMDBApiKeyMissingError(TMDBError):
+    """Raised when TMDB API Key is missing in config."""
+    pass
 
 @app.route("/", methods=["GET"])
 def config_page():
@@ -305,6 +359,18 @@ def run_task():
     configs = load_config()
     if not configs:
         return jsonify({"message": "没有可用的配置"}), 400
+
+    try:
+        # --- 使用辅助函数检查 TMDB 连接 ---
+        _check_tmdb_connectivity(configs, task_type="手动任务")
+        # --- 检查通过，继续执行 ---
+    except (TMDBConnectionError, TMDBApiKeyMissingError) as e: # <--- 合并两个异常类型
+        # 连接失败或 Key 缺失
+        return jsonify({"message": str(e)}), 503 # 返回具体的错误消息
+    except TMDBError as e: # 捕获其他可能的 TMDB 错误 (如果未来添加)
+         logger.error(f"TMDB 检查时发生未知错误: {e}", exc_info=True) # 添加日志记录
+         return jsonify({"message": f"TMDB 检查时发生未知错误: {e}"}), 500
+    # --- 检查结束 ---
 
     # 清零进度 (将在 wrapper 中重新初始化)
     progress["total"] = 0

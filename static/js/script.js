@@ -83,17 +83,28 @@ function saveConfig(e){
 $('#btn-run').click(()=>{
   // 重置进度显示
   $('#progress-bar').css('width','0%').text('0%');
-  $('#progress-text').text('0 / 0');
+  $('#progress-text').text('等待开始，正在检查TMDB连通性...'); // 初始状态
   $('#success-count').text('0');
   $('#failed-count').text('0');
   $('#error-details').empty();
   $('#error-list').hide();
-  $('#complete-message').hide();
-  
+  $('#complete-message').hide().removeClass('alert-danger alert-success alert-warning'); // 清除旧样式
+
   $('#progressModal').modal('show');
+
   fetch('/run_task',{method:'POST'})
-    .then(()=>{
-      let lastProcessed = 0;
+    .then(response => { // <--- 处理响应
+      if (!response.ok) { // 检查 HTTP 状态码是否表示成功 (例如 2xx)
+        // 如果状态码不是 202 Accepted，说明任务启动失败 (例如 TMDB 检查失败返回 503)
+        return response.json().then(err => { throw new Error(err.message || `任务启动失败，状态码: ${response.status}`); });
+      }
+      // 如果状态码是 202，表示任务已接受并开始在后台运行
+      return response.json(); // 继续处理正常的启动消息（虽然我们这里不直接用它）
+    })
+    .then(()=>{ // <--- 只有在 fetch 成功 (状态码 202) 时才执行
+      // 任务已成功启动，开始轮询进度
+      $('#progress-text').text('任务已启动，正在获取进度...'); // 更新状态
+      let lastProcessed = -1; // 初始化为 -1 确保第一次更新能显示
       // 每秒刷新一次进度
       const timer = setInterval(()=>{
         fetch('/progress').then(r=>r.json()).then(p=>{
@@ -103,43 +114,67 @@ $('#btn-run').click(()=>{
             $('#progress-text').text(`${p.processed} / ${p.total}`);
             $('#success-count').text(p.success || 0);
             $('#failed-count').text(p.failed || 0);
-            
+
             // 显示错误详情
             if(p.errors && p.errors.length > 0) {
               const errorList = $('#error-details');
+              // 优化：只添加新的错误，避免重复渲染 (如果需要)
+              // 这里简单起见，每次都清空重填
               errorList.empty();
               p.errors.forEach(error => {
+                // 添加配置名称（如果后端提供了）
+                const configName = error.config_name ? `[${error.config_name}] ` : '';
                 errorList.append(`
                   <li class="text-danger mb-2">
-                    <strong>${error.file}</strong><br>
+                    <strong>${configName}${error.file}</strong><br>
                     <small>${error.message}</small>
                   </li>
                 `);
               });
               $('#error-list').show();
+            } else {
+              $('#error-list').hide(); // 没有错误时隐藏列表
             }
-            
+
             lastProcessed = p.processed;
           }
-          
-          if(p.completed || (p.processed >= p.total && p.total > 0)){
+
+          if(p.completed || (p.processed >= p.total && p.total > 0 && p.total !== 0)){ // 确保 total 不为 0
             clearInterval(timer);
             // 显示完成消息
             const failed = p.failed || 0;
             const msgDiv = $('#complete-message');
-            const logPath = p.log_path || '/logs/movie_manager.log';
-            
-            if(failed === 0){
-              msgDiv.removeClass('alert-warning').addClass('alert-success')
+            const logPath = p.log_path || '/logs/media_manager.log'; // 使用后端提供的日志路径
+
+            if(failed === 0 && (!p.errors || p.errors.length === 0)){ // 确保没有错误记录
+              msgDiv.removeClass('alert-warning alert-danger').addClass('alert-success')
                    .html('✅ 任务完成！所有文件处理成功。');
             } else {
-              msgDiv.removeClass('alert-success').addClass('alert-warning')
+              msgDiv.removeClass('alert-success alert-danger').addClass('alert-warning')
                    .html(`⚠️ 任务完成！${failed}个文件处理失败。<br>
-                         详细错误信息已保存至：<br><code class="bg-light p-1">${logPath}</code>`);
+                         详细错误信息已保存至日志或见下方列表。<br>日志路径: <code class="bg-light p-1">${logPath}</code>`);
             }
             msgDiv.show();
           }
+        }).catch(progressError => { // <--- 处理 /progress 请求本身的错误
+            console.error("获取进度失败:", progressError);
+            clearInterval(timer); // 停止轮询
+            const msgDiv = $('#complete-message');
+            msgDiv.removeClass('alert-success alert-warning').addClass('alert-danger')
+                 .html(`❌ 获取任务进度时出错: ${progressError.message}`)
+                 .show();
         });
       }, 1000);
+    })
+    .catch(error => { // <--- 捕获 /run_task 的错误 (包括我们抛出的 Error)
+      console.error("启动任务失败:", error);
+      // 在模态框中显示启动错误信息
+      const msgDiv = $('#complete-message');
+      msgDiv.removeClass('alert-success alert-warning').addClass('alert-danger')
+           .html(`❌ 任务启动失败: ${error.message}`)
+           .show();
+      // 可以选择隐藏进度条等元素
+      $('#progress-bar').parent().hide();
+      $('#progress-stats').hide();
     });
 });

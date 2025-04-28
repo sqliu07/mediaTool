@@ -1,6 +1,39 @@
 from common_imports import *
+import requests  # 确保导入 requests
 
 logger = logging.getLogger(__name__)
+
+def check_tmdb_connection(api_key):
+    """
+    检查与 TMDB 的连接以及 API Key 是否有效。
+    尝试访问 TMDB 配置接口。
+    """
+    if not api_key:
+        logger.warning("未提供 TMDB API Key，无法检查连接。")
+        return False # 或者 True，取决于是否认为没有 Key 就算连接失败
+
+    check_url = "https://api.themoviedb.org/3/configuration"
+    params = {"api_key": api_key}
+    try:
+        response = requests.get(check_url, params=params, timeout=5) # 设置较短超时
+        response.raise_for_status() # 检查 HTTP 错误 (如 401 Unauthorized)
+        logger.info("TMDB 连接成功且 API Key 有效。")
+        return True
+    except requests.exceptions.Timeout:
+        logger.error("连接 TMDB 超时。")
+        return False
+    except requests.exceptions.RequestException as e:
+        if e.response is not None:
+            if e.response.status_code == 401:
+                logger.error(f"TMDB API Key 无效或未授权: {e}")
+            else:
+                logger.error(f"连接 TMDB 时发生 HTTP 错误: {e}")
+        else:
+            logger.error(f"连接 TMDB 时发生网络错误: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"检查 TMDB 连接时发生未知错误: {e}")
+        return False
 
 # 函数重命名并添加 media_type 参数
 def fetch_metadata(media_name, year, tmdb_api_key, media_type='movie'):
@@ -178,3 +211,5 @@ def download_poster(metadata, target_dir, media_file_stem):
     except Exception as e:
         logger.error(f"下载海报时发生未知错误：{e}")
     return poster_path
+
+
