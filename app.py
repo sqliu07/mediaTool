@@ -62,17 +62,7 @@ def save_config(configs):
 
 # APScheduler
 scheduler = BackgroundScheduler()
-
-# Remove the old scheduled_job function as it's incorrect and unused by start_scheduler
-# def scheduled_job():
-#     configs = load_config()
-#     if not configs:
-#         return
-#     cfg = configs[0]
-#     logger.info("【定时任务】开始扫描并处理电影")
-#     # 启动一次后台任务
-#     thread = Thread(target=run_process_wrapper, args=(cfg,))
-#     thread.start()
+scheduler.start()
 
 def run_scheduled_task():
     """后台定时执行的任务，处理所有配置"""
@@ -345,4 +335,4 @@ if __name__ == "__main__":
             # 使用第一个配置的间隔来设置调度频率
             initial_interval = initial_configs[0].get("schedule_interval", 0)
         start_scheduler(initial_interval)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=False)
