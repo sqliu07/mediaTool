@@ -390,15 +390,12 @@ def get_progress():
     # 使用全局变量中的日志路径
     return jsonify(progress)
 
+cfgs = load_config()
+if cfgs:
+    initial_interval = cfgs[0].get("schedule_interval", 0)
+    start_scheduler(initial_interval)
+
+# --- 以下仅供开发时本地调试 ---
 if __name__ == "__main__":
-    # 程序启动时加载一次定时器
-    cfgs = load_config()
-    if cfgs:
-        # 启动时加载配置并设置初始调度器
-        initial_configs = load_config()
-        initial_interval = 0
-        if initial_configs:
-            # 使用第一个配置的间隔来设置调度频率
-            initial_interval = initial_configs[0].get("schedule_interval", 0)
-        start_scheduler(initial_interval)
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    print("[调试模式] 使用 Flask 自带服务器启动...")
+    app.run(host="0.0.0.0", port=5001, debug=True)
