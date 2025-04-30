@@ -82,6 +82,7 @@ function saveConfig(e){
 // 启动任务并监控进度
 $('#btn-run').click(()=>{
   // 重置进度显示
+  let startTime = Date.now();
   $('#progress-bar').css('width','0%').text('0%');
   $('#progress-text').text('等待开始，正在检查TMDB连通性...'); // 初始状态
   $('#success-count').text('0');
@@ -112,6 +113,12 @@ $('#btn-run').click(()=>{
             const pct = p.total>0 ? Math.floor(p.processed*100/p.total) : 0;
             $('#progress-bar').css('width',pct+'%').text(pct+'%');
             $('#progress-text').text(`${p.processed} / ${p.total}`);
+            const elapsedMs = Date.now() - startTime;
+            const elapsedSec = Math.floor(elapsedMs / 1000);
+            const hours = String(Math.floor(elapsedSec / 3600)).padStart(2, '0');
+            const minutes = String(Math.floor((elapsedSec % 3600) / 60)).padStart(2, '0');
+            const seconds = String(elapsedSec % 60).padStart(2, '0');
+            $('#elapsed-time').text(`耗时：${hours}:${minutes}:${seconds}`);
             $('#success-count').text(p.success || 0);
             $('#failed-count').text(p.failed || 0);
 
