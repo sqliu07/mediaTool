@@ -122,15 +122,15 @@ $('#btn-run').click(()=>{
               // 这里简单起见，每次都清空重填
               errorList.empty();
               p.errors.forEach(error => {
-                // 添加配置名称（如果后端提供了）
                 const configName = error.config_name ? `[${error.config_name}] ` : '';
                 errorList.append(`
-                  <li class="text-danger mb-2">
+                  <li class="mb-2">
                     <strong>${configName}${error.file}</strong><br>
-                    <small>${error.message}</small>
+                    <code>${error.message}</code>
                   </li>
                 `);
               });
+              
               $('#error-list').show();
             } else {
               $('#error-list').hide(); // 没有错误时隐藏列表
@@ -152,7 +152,7 @@ $('#btn-run').click(()=>{
             } else {
               msgDiv.removeClass('alert-success alert-danger').addClass('alert-warning')
                    .html(`⚠️ 任务完成！${failed}个文件处理失败。<br>
-                         详细错误信息已保存至日志或见下方列表。<br>日志路径: <code class="bg-light p-1">${logPath}</code>`);
+                         详细错误信息已保存至日志。<br>日志路径: <code class="bg-light p-1">${logPath}</code>`);
             }
             msgDiv.show();
           }

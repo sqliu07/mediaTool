@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import secrets
 from threading import Thread
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -20,7 +21,7 @@ current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_filename = os.path.join(LOG_DIR, f"media_tools_{current_time}.log")
 
 app = Flask(__name__)
-app.secret_key = "your-secret-key"  # 请修改
+app.secret_key = os.getenv("SECRET_KEY") or secrets.token_hex(16)
 
 # 日志初始化
 logging.basicConfig(level=logging.DEBUG,
@@ -272,6 +273,20 @@ def run_single_config_wrapper(cfg, progress_callback):
                  logger.error(f"调用进度回调时出错: {cb_e}")
 
 
+def estimate_file_count(cfg):
+    """预估某个配置下要处理的文件总数"""
+    count = 0
+    suffixes = [s.strip() for s in cfg.get("file_suffixes", "").split(",") if s.strip()]
+    for path in cfg.get("paths", []):
+        src = path.get("source")
+        if not src or not os.path.exists(src):
+            continue
+        for root, _, files in os.walk(src):
+            for file in files:
+                if any(file.endswith(suffix) for suffix in suffixes):
+                    count += 1
+    return count
+
 # New wrapper to run all configs sequentially with combined progress
 def run_all_configs_sequentially_wrapper():
     """按顺序处理所有配置，并在全局 progress 对象中报告累积进度"""
@@ -279,42 +294,34 @@ def run_all_configs_sequentially_wrapper():
     configs = load_config()
     if not configs:
         logger.info("没有找到配置，任务跳过。")
-        # Reset progress and mark as complete if no configs
-        progress["total"] = 0
-        progress["processed"] = 0
-        progress["success"] = 0
-        progress["failed"] = 0
-        progress["completed"] = True
-        progress["errors"] = []
+        progress.update({
+            "total": 0, "processed": 0, "success": 0, "failed": 0,
+            "completed": True, "errors": []
+        })
         return
 
-    # Initialize overall progress
-    overall_total = 0
-    overall_processed = 0
-    overall_success = 0
-    overall_failed = 0
-    overall_errors = []
-    progress["completed"] = False # Mark as not completed initially
-
-    # --- First pass: Estimate total files across all configs ---
-    # This is tricky without actually running scan_files for all.
-    # We might need to adjust process_movies to return the count first,
-    # or just update the total dynamically.
-    # For simplicity now, we'll update total within the loop.
-    progress["total"] = 0 # Start total at 0, will increment
+    # 初始化
+    progress["completed"] = False
+    progress["total"] = 0
     progress["processed"] = 0
     progress["success"] = 0
     progress["failed"] = 0
     progress["errors"] = []
 
+    # ⭐ 第一阶段：预估所有配置总任务数
+    for cfg in configs:
+        try:
+            count = estimate_file_count(cfg)
+            progress["total"] += count
+        except Exception as e:
+            logger.warning(f"预估配置 '{cfg.get('name', '未命名')}' 文件数失败：{e}")
 
-    def create_progress_callback(config_index, total_configs):
-        """Creates a progress callback for a specific config run"""
+    # ⭐ 第二阶段：正式执行处理
+    def create_progress_callback(config_index):
+        """返回某配置的 progress 回调函数"""
         def progress_cb(event, value, success=True, error_info=None):
-            global progress
             if event == "initialize":
-                # Add to the overall total
-                progress["total"] += value
+                pass  # 已预估，无需再增加 total
             elif event == "update":
                 progress["processed"] += 1
                 if success:
@@ -322,34 +329,23 @@ def run_all_configs_sequentially_wrapper():
                 else:
                     progress["failed"] += 1
                     if error_info:
-                        # Prepend config name to error info for clarity
                         error_info["config_name"] = configs[config_index].get('name', f'配置 {config_index+1}')
                         progress["errors"].append(error_info)
-            # We handle 'complete' event after the loop finishes
         return progress_cb
 
-    # --- Second pass: Process each config sequentially ---
-    for i, config_item in enumerate(configs):
-        config_name = config_item.get('name', f'配置 {i+1}')
+    for i, cfg in enumerate(configs):
+        config_name = cfg.get("name", f"配置 {i+1}")
         logger.info(f"开始顺序处理配置 {i+1}/{len(configs)}: {config_name}")
-        callback_for_this_config = create_progress_callback(i, len(configs))
+        cb = create_progress_callback(i)
         try:
-            # Call process_movies directly, passing the specific callback
-            process_movies(config_item, progress_callback=callback_for_this_config)
-            logger.info(f"顺序处理配置 '{config_name}' 完成。")
+            process_movies(cfg, progress_callback=cb)
+            logger.info(f"配置 '{config_name}' 处理完成。")
         except Exception as e:
-            error_msg = f"处理配置 '{config_name}' 时出错: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            # Report error via progress if possible
-            if callback_for_this_config:
-                 try:
-                     callback_for_this_config("update", None, success=False, error_info={"file": f"配置 {config_name} 启动时出错", "message": error_msg})
-                 except Exception as cb_e:
-                     logger.error(f"调用进度回调时出错: {cb_e}")
+            logger.error(f"配置 '{config_name}' 执行异常: {e}", exc_info=True)
+            cb("update", None, success=False, error_info={"file": "全局错误", "message": str(e)})
 
-    # Mark overall completion
     progress["completed"] = True
-    logger.info("所有配置顺序处理完毕。")
+    logger.info("所有配置处理完毕。")
 
 
 @app.route("/run_task", methods=["POST"])
