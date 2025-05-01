@@ -1,8 +1,13 @@
 from common_imports import *
+
 import requests  # 确保导入 requests
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
+@lru_cache(maxsize=512)
+def fetch_metadata_cached(title, year, api_key, media_type):
+    return fetch_metadata(title, year, api_key, media_type)
 def check_tmdb_connection(api_key):
     """
     检查与 TMDB 的连接以及 API Key 是否有效。
@@ -202,7 +207,7 @@ def download_poster(metadata, target_dir, media_file_stem):
             with open(poster_path, 'wb') as poster_file:
                 for chunk in response.iter_content(8192): # 增大 chunk size
                     poster_file.write(chunk)
-            logger.info(f"下载并保存海报：{poster_path}")
+            app.py下载并保存海报：{poster_path}")
 
     except requests.exceptions.RequestException as e:
          logger.error(f"下载海报网络请求出错 ({full_url}): {e}")

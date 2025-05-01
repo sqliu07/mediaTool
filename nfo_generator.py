@@ -22,7 +22,7 @@ def generate_nfo(metadata, nfo_path, original_filename=""):
     """
     try:
         root = ET.Element("movie")
-
+        _add_sub_element(root, "originalfilename", original_filename)
         _add_sub_element(root, "title", metadata.get("title"))
         _add_sub_element(root, "originaltitle", metadata.get("original_title"))
         _add_sub_element(root, "sorttitle", metadata.get("title")) # 通常与标题相同
@@ -88,7 +88,7 @@ def generate_tv_nfo(metadata, nfo_path, original_filename=""):
     """
     try:
         root = ET.Element("episodedetails")
-
+        _add_sub_element(root, "originalfilename", original_filename)
         # --- 使用剧集信息填充 ---
         _add_sub_element(root, "showtitle", metadata.get("title")) # 剧集标题
         # season 和 episode 现在是字符串

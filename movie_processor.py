@@ -1,7 +1,7 @@
 from common_imports import *
-from metadata_fetcher import fetch_metadata, download_poster # 可能需要添加 fetch_tv_metadata
+from metadata_fetcher import fetch_metadata_cached, download_poster
 from nfo_generator import generate_nfo, generate_tv_nfo
-from filename_parser import parse_filename # <--- 修改导入
+from filename_parser import parse_filename
 
 logger = logging.getLogger(__name__)
 
@@ -22,20 +22,20 @@ def process_single_file(file_path, config, rel_dir, target_dir):
 
         # 确保目录存在
         os.makedirs(dest_dir, exist_ok=True)
-        logger.debug(f"创建目录：{dest_dir}")
+        logger.info(f"[配置:{config.get('name', '未知')}] 创建目录：{dest_dir}")
 
         dest_path = os.path.join(dest_dir, filename)
 
         # 创建硬链接（若目标文件不存在）
         if not os.path.exists(dest_path):
             os.link(file_path, dest_path)
-            logger.info(f"创建硬链接：{file_path} -> {dest_path}")
+            logger.info(f"[配置:{config.get('name', '未知')}] 创建硬链接：{file_path} -> {dest_path}")
         else:
-            logger.info(f"硬链接已存在：{dest_path}")
+            logger.info(f"[配置:{config.get('name', '未知')}] 硬链接已存在：{dest_path}")
 
         # 分析文件信息
         file_info = parse_filename(filename) # <--- 使用新的解析函数
-        logger.debug(f"解析文件名: {filename}，信息: {file_info}")
+        logger.info(f"[配置:{config.get('name', '未知')}] 解析文件名: {filename}，信息: {file_info}")
 
         if not file_info:
             error_msg = f"无法解析文件名：{filename}"
@@ -45,20 +45,13 @@ def process_single_file(file_path, config, rel_dir, target_dir):
         media_type = file_info.get('type', 'unknown')
         config_media_type = config.get('file_type', 'movie') # 从配置获取期望类型
 
-        # --- 这里可以根据 media_type 和 config_media_type 决定处理逻辑 ---
-        # 例如，如果配置是电影，但解析出来是电视剧，可以跳过或记录警告
-        # if media_type != config_media_type and media_type != 'unknown':
-        #     logger.warning(f"文件类型 ({media_type}) 与配置 ({config_media_type}) 不符: {filename}")
-        #     # 可以选择返回错误或继续按配置类型处理
-        #     # return False, f"文件类型与配置不符: {filename}"
-
         metadata = None
         if media_type == 'movie' or (media_type == 'unknown' and config_media_type == 'movie'):
             movie_name = file_info.get('title')
             year = file_info.get('year')
-            logger.info(f"作为电影处理: {movie_name} ({year})")
+            logger.info(f"[配置:{config.get('name', '未知')}] 作为电视剧处理: {movie_name} ({year})")
             # 使用新的函数名 fetch_metadata 并传递 media_type='movie'
-            metadata = fetch_metadata(movie_name, year, config.get("tmdb_api_key", ""), media_type='movie')
+            metadata = fetch_metadata_cached(movie_name, year, config.get("tmdb_api_key", ""), media_type='movie')
             if not metadata:
                 error_msg = f"无法获取电影元数据：{filename}"
                 logger.warning(error_msg)
@@ -70,15 +63,15 @@ def process_single_file(file_path, config, rel_dir, target_dir):
             season = file_info.get('season')
             episode = file_info.get('episode')
             # 调整日志格式，直接使用字符串
-            logger.info(f"作为电视剧处理: {show_name} S{season}E{episode}")
+            logger.info(f"[配置:{config.get('name', '未知')}] 作为电视剧处理: {show_name} S{season}E{episode}")
             # 调用 fetch_metadata 获取电视剧元数据
             # 注意：电视剧搜索通常不依赖年份，所以第二个参数传 None
-            metadata = fetch_metadata(show_name, None, config.get("tmdb_api_key", ""), media_type='tv_show')
+            metadata = fetch_metadata_cached(show_name, None, config.get("tmdb_api_key", ""), media_type='tv_show')
             if not metadata:
                 # 如果获取剧集元数据失败，可以尝试只用剧名搜索剧集信息（不含季/集）
                 # 这对于生成剧集级别的 NFO 可能有用
-                logger.warning(f"无法获取电视剧元数据：{filename}，尝试仅获取剧集信息...")
-                metadata = fetch_metadata(show_name, None, config.get("tmdb_api_key", ""), media_type='tv_show')
+                logger.warning(f"[配置:{config.get('name', '未知')}] 无法获取电视剧元数据：{filename}，尝试仅获取剧集信息...")
+                metadata = fetch_metadata_cached(show_name, None, config.get("tmdb_api_key", ""), media_type='tv_show')
                 if not metadata:
                     error_msg = f"无法获取电视剧元数据：{filename}"
                     logger.warning(error_msg)
@@ -124,13 +117,21 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                 # 使用 .format(**dict) 传递所有占位符
                 new_name_base = rename_rule.format(**rename_placeholders)
             except KeyError as e:
-                 logger.warning(f"重命名规则 '{rename_rule}' 包含无效占位符 {e} for {filename}. 使用默认规则。")
+                 logger.warning(f"[配置:{config.get('name', '未知')}] 重命名规则 '{rename_rule}' 包含无效占位符 {e} for {filename}. 使用默认规则。")
                  new_name_base = default_rename_rule.format(**rename_placeholders)
 
 
             new_ext = os.path.splitext(filename)[1]
             new_filename = new_name_base + new_ext
             new_path = os.path.join(dest_dir, new_filename)
+
+            nfo_filename = f"{os.path.splitext(new_filename)[0]}.nfo"
+            nfo_path = os.path.join(dest_dir, nfo_filename)
+            poster_path = os.path.join(dest_dir, os.path.splitext(new_filename)[0] + "-poster.jpg")  # 注意：你的 download_poster 就是这么命名的
+
+            if all(os.path.exists(p) for p in [new_path, nfo_path, poster_path]):
+                logger.info(f"[配置:{config.get('name', '未知')}] 跳过已处理文件：{new_filename}")
+                return True, ""
 
             # 如果新文件名不存在则执行重命名操作
             current_file_to_rename = dest_path # 初始硬链接路径
@@ -154,7 +155,7 @@ def process_single_file(file_path, config, rel_dir, target_dir):
             # 生成 nfo 文件（与媒体文件同名）
             nfo_filename = f"{os.path.splitext(new_filename)[0]}.nfo"
             nfo_path = os.path.join(dest_dir, nfo_filename)
-            logger.debug(f"生成 nfo 文件：{nfo_path}")
+            logger.info(f"[配置:{config.get('name', '未知')}] 生成 nfo 文件：{nfo_path}")
             # 根据类型调用不同的 NFO 生成器
             nfo_generated = False
             if metadata.get('media_type') == 'movie': # 使用 metadata 中的类型判断更可靠
@@ -164,14 +165,14 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                  nfo_generated = generate_tv_nfo(metadata, nfo_path, original_filename=filename)
 
             if not nfo_generated:
-                 logger.warning(f"未能生成 NFO 文件 for {new_filename}")
+                 logger.warning(f"[配置:{config.get('name', '未知')}] 未能生成 NFO 文件 for {new_filename}")
 
 
             # 下载并保存海报，使用新的文件名
-            logger.debug(f"下载海报并保存到：{dest_dir}")
+            logger.info(f"[配置:{config.get('name', '未知')}] 下载海报并保存到：{dest_dir}")
             poster_path = download_poster(metadata, dest_dir, os.path.splitext(new_filename)[0]) # 传递不带扩展名的文件名
             if not poster_path:
-                logger.warning(f"未能下载海报：{new_filename}")
+                logger.warning(f"[配置:{config.get('name', '未知')}] 未能下载海报：{new_filename}")
 
         return True, ""
 
@@ -179,7 +180,6 @@ def process_single_file(file_path, config, rel_dir, target_dir):
         error_msg = f"处理文件 {file_path} 出错：{str(e)}"
         logger.exception(error_msg) # 使用 exception 记录堆栈信息
         return False, error_msg
-
 
 def process_movies(config_or_download_dir, target_dir=None, tmdb_api_key=None, progress_callback=None):
     """
@@ -252,11 +252,11 @@ def process_movies(config_or_download_dir, target_dir=None, tmdb_api_key=None, p
     if failed_files:
         logger.warning("以下文件处理失败：")
         for fp, error in failed_files:
-            logger.warning(f"  - 文件：{fp}")
-            logger.warning(f"    错误：{error}")
+            logger.warning(f"[配置:{config.get('name', '未知')}]   - 文件：{fp}")
+            logger.warning(f"[配置:{config.get('name', '未知')}]     错误：{error}")
     
     if progress_callback:
         progress_callback("complete", 0)
     
-    logger.info(f"全部文件处理完毕！成功：{total - len(failed_files)}，失败：{len(failed_files)}")
+    logger.info(f"[配置:{config.get('name', '未知')}] 全部文件处理完毕！成功：{total - len(failed_files)}，失败：{len(failed_files)}")
 

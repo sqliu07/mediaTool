@@ -3,11 +3,12 @@ import json
 import logging
 import secrets
 from threading import Thread
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
+from datetime import datetime
+from flask import Flask, render_template, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
+
 from movie_processor import process_movies
 from metadata_fetcher import check_tmdb_connection
-from datetime import datetime
 
 CONFIG_FILE = "configs/config.json"
 
