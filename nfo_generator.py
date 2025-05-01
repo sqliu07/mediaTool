@@ -157,3 +157,52 @@ def generate_tv_nfo(metadata, nfo_path, original_filename=""):
         logger.error(f"生成电视剧 NFO 文件失败 ({nfo_path}): {e}")
         return False
 
+def generate_tvshow_nfo(metadata, nfo_path):
+    """
+    为整部剧集生成 tvshow.nfo 文件，包含剧名、简介、导演、演员等。
+    """
+    try:
+        root = ET.Element("tvshow")
+        _add_sub_element(root, "title", metadata.get("title"))
+        _add_sub_element(root, "originaltitle", metadata.get("original_title"))
+        _add_sub_element(root, "sorttitle", metadata.get("title"))
+        _add_sub_element(root, "plot", metadata.get("overview"))
+        _add_sub_element(root, "studio", metadata.get("studio"))
+        _add_sub_element(root, "status", metadata.get("status"))
+        _add_sub_element(root, "year", metadata.get("year"))
+        _add_sub_element(root, "premiered", metadata.get("release_date"))
+
+        for genre in metadata.get("genres", []):
+            _add_sub_element(root, "genre", genre)
+
+        for lang in metadata.get("spoken_languages", []):
+            _add_sub_element(root, "language", lang)
+
+        _add_sub_element(root, "rating", metadata.get("vote_average"))
+        _add_sub_element(root, "votes", metadata.get("vote_count"))
+
+        if metadata.get("tmdbid"):
+            uniqueid_tmdb = ET.SubElement(root, "uniqueid", {"type": "tmdb", "default": "true"})
+            uniqueid_tmdb.text = str(metadata["tmdbid"])
+        if metadata.get("imdb_id"):
+            uniqueid_imdb = ET.SubElement(root, "uniqueid", {"type": "imdb"})
+            uniqueid_imdb.text = metadata["imdb_id"]
+
+        for director in metadata.get("directors", []):
+            _add_sub_element(root, "director", director.get("name"))
+
+        for actor in metadata.get("cast", [])[:20]:
+            actor_elem = ET.SubElement(root, "actor")
+            _add_sub_element(actor_elem, "name", actor.get("name"))
+            _add_sub_element(actor_elem, "role", actor.get("character"))
+
+        # 写入文件
+        xml_str = _pretty_print_xml(root)
+        with open(nfo_path, "wb") as f:
+            f.write(xml_str)
+        logger.info(f"成功生成 tvshow.nfo 文件：{nfo_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"生成 tvshow.nfo 失败 ({nfo_path}): {e}")
+        return False

@@ -217,4 +217,32 @@ def download_poster(metadata, target_dir, media_file_stem):
         logger.error(f"下载海报时发生未知错误：{e}")
     return poster_path
 
+def fetch_episode_metadata(tv_id, season, episode, api_key):
+    """
+    从 TMDB 获取单集元数据（标题、简介、首播日期等）。
+    """
+    url = f"https://api.themoviedb.org/3/tv/{tv_id}/season/{season}/episode/{episode}"
+    params = {
+        "api_key": api_key,
+        "language": "zh-CN",  # 可换 en-US
+        "append_to_response": "credits"
+    }
 
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "episode_title": data.get("name"),
+            "episode_overview": data.get("overview"),
+            "episode_air_date": data.get("air_date"),
+            "guest_stars": data.get("guest_stars", []),
+            "episode_directors": [
+                {"name": c["name"], "id": c["id"]}
+                for c in data.get("credits", {}).get("crew", [])
+                if c.get("job") == "Director"
+            ],
+        }
+    except Exception as e:
+        logger.warning(f"获取单集元数据失败（S{season}E{episode}）: {e}")
+        return {}

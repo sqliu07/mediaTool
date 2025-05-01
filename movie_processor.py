@@ -1,6 +1,6 @@
 from common_imports import *
-from metadata_fetcher import fetch_metadata_cached, download_poster
-from nfo_generator import generate_nfo, generate_tv_nfo
+from metadata_fetcher import fetch_metadata_cached, fetch_episode_metadata, download_poster
+from nfo_generator import generate_nfo, generate_tv_nfo, generate_tvshow_nfo
 from filename_parser import parse_filename
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,8 @@ def process_single_file(file_path, config, rel_dir, target_dir):
             "episode": file_info.get("episode", "00"),
         }
         rename_placeholders["season_episode"] = f"S{rename_placeholders['season']}E{rename_placeholders['episode']}" if (metadata and metadata.get("media_type") == "tv_show") else ""
+        #单集标题
+        rename_placeholders["episode_title"] = metadata.get("episode_title", "").replace(" ", "_")[:50] if metadata else ""
 
         # 文件重命名逻辑
         new_filename = filename
@@ -92,9 +94,44 @@ def process_single_file(file_path, config, rel_dir, target_dir):
             if metadata.get("media_type") == "movie":
                 generate_nfo(metadata, nfo_path, original_filename=filename)
             else:
+                # 电视剧，尝试获取 episode 元数据
+                episode_info = fetch_episode_metadata(
+                    metadata.get("tmdbid"),
+                    file_info.get("season", "1"),
+                    file_info.get("episode", "1"),
+                    config.get("tmdb_api_key", "")
+                )
+                # 合并覆盖原 metadata 中的 episode 信息
+                if episode_info:
+                    if episode_info.get("episode_title"):
+                        metadata["episode_title"] = episode_info["episode_title"]
+                    if episode_info.get("episode_overview"):
+                        metadata["overview"] = episode_info["episode_overview"]
+                    if episode_info.get("episode_air_date"):
+                        metadata["release_date"] = episode_info["episode_air_date"]
+                    if episode_info.get("episode_directors"):
+                        metadata["directors"] = episode_info["episode_directors"]
+                    metadata["guest_stars"] = episode_info.get("guest_stars", [])
+
                 generate_tv_nfo(metadata, nfo_path, original_filename=filename)
+                
 
             download_poster(metadata, dest_dir, base_name_no_ext)
+
+                # 额外处理：如果是电视剧并且还未生成 tvshow.nfo，则生成整部剧的 nfo 和 poster.jpg
+            if metadata.get("media_type") == "tv_show":
+                tvshow_nfo_path = os.path.join(dest_dir, "tvshow.nfo")
+                tvshow_poster_path = os.path.join(dest_dir, "poster.jpg")
+                if not os.path.exists(tvshow_nfo_path):
+                    generate_tvshow_nfo(metadata, tvshow_nfo_path)
+                if not os.path.exists(tvshow_poster_path):
+                    temp_path = download_poster(metadata, dest_dir, "tvshow")
+                    try:
+                        if os.path.exists(temp_path):
+                            os.rename(temp_path, tvshow_poster_path)
+                            logger.info(f"重命名剧集封面：{temp_path} -> {tvshow_poster_path}")
+                    except Exception as e:
+                        logger.warning(f"重命名 poster.jpg 失败：{e}")  
 
         return True, ""
 
