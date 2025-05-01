@@ -311,7 +311,7 @@ def run_all_configs_sequentially_wrapper():
     progress["failed"] = 0
     progress["errors"] = []
 
-    # ⭐ 第一阶段：预估所有配置总任务数
+    # 第一阶段：预估所有配置总任务数
     for cfg in configs:
         try:
             count = estimate_file_count(cfg)
@@ -319,7 +319,7 @@ def run_all_configs_sequentially_wrapper():
         except Exception as e:
             logger.warning(f"预估配置 '{cfg.get('name', '未命名')}' 文件数失败：{e}")
 
-    # ⭐ 第二阶段：正式执行处理
+    # 第二阶段：正式执行处理
     def create_progress_callback(config_index):
         """返回某配置的 progress 回调函数"""
         def progress_cb(event, value, success=True, error_info=None):
