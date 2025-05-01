@@ -84,7 +84,6 @@ def generate_nfo(metadata, nfo_path, original_filename=""):
 def generate_tv_nfo(metadata, nfo_path, original_filename=""):
     """
     为电视剧集生成 NFO 文件。
-    注意：当前 metadata 主要包含剧集信息，缺少单集详情。
     """
     try:
         root = ET.Element("episodedetails")
@@ -144,7 +143,10 @@ def generate_tv_nfo(metadata, nfo_path, original_filename=""):
             _add_sub_element(actor_elem, "role", actor.get("character"))
             # TODO: 获取单集特定演员或嘉宾 (Guest Stars)
 
-        # TODO: 添加单集缩略图 <thumb>，目前缺失
+        base_name_no_ext = os.path.splitext(os.path.basename(nfo_path))[0]
+        thumb_filename = base_name_no_ext + "-thumb.jpg"
+        if os.path.exists(os.path.join(os.path.dirname(nfo_path), thumb_filename)):
+            _add_sub_element(root, "thumb", thumb_filename)
 
         # 写入文件
         xml_str = _pretty_print_xml(root)

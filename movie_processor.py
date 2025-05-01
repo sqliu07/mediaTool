@@ -113,6 +113,22 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                         metadata["directors"] = episode_info["episode_directors"]
                     metadata["guest_stars"] = episode_info.get("guest_stars", [])
 
+                    still_path = episode_info.get("still_path")
+                    if still_path:
+                        try:
+                            thumb_url = "https://image.tmdb.org/t/p/w500" + still_path
+                            base_name_no_ext = os.path.splitext(new_filename)[0]
+                            thumb_path = os.path.join(dest_dir, base_name_no_ext + "-thumb.jpg")
+                            if not os.path.exists(thumb_path):
+                                r = requests.get(thumb_url, stream=True, timeout=10)
+                                r.raise_for_status()
+                                with open(thumb_path, "wb") as f:
+                                    for chunk in r.iter_content(8192):
+                                        f.write(chunk)
+                                logger.info(f"成功下载单集缩略图：{thumb_path}")
+                        except Exception as e:
+                            logger.warning(f"下载缩略图失败：{e}")
+
                 generate_tv_nfo(metadata, nfo_path, original_filename=filename)
                 
 

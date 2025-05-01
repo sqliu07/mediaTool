@@ -236,6 +236,7 @@ def fetch_episode_metadata(tv_id, season, episode, api_key):
             "episode_title": data.get("name"),
             "episode_overview": data.get("overview"),
             "episode_air_date": data.get("air_date"),
+            "still_path": data.get("still_path"),
             "guest_stars": data.get("guest_stars", []),
             "episode_directors": [
                 {"name": c["name"], "id": c["id"]}
