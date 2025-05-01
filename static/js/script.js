@@ -1,7 +1,59 @@
 // 打开/关闭编辑面板
+let chartInstance = null;
 function openEditor() { $('#editor-panel').addClass('open'); }
 function closeEditor(){ $('#editor-panel').removeClass('open'); }
 
+function loadStats() {
+  fetch('/stats')
+    .then(r => r.json())
+    .then(data => {
+      window.mediaSizeMap = data.size || {};
+      const ctx = document.getElementById('media-chart').getContext('2d');
+      const labels = ['电影', '电视剧', '未知'];
+      const values = [data.movie || 0, data.tv_show || 0, data.unknown || 0];
+
+      if (chartInstance) chartInstance.destroy(); // 避免重复创建
+      chartInstance = new Chart(ctx, {
+        type: 'pie',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: '媒体类型统计',
+            data: values,
+            borderWidth: 1
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position: 'bottom' },
+            title: { display: true, text: '媒体类型分布' },
+            tooltip: {
+              callbacks: {
+                label: function(context) {
+                  const index = context.dataIndex;
+                  const count = context.dataset.data[index];
+                  const type = context.label; // "电影" / "电视剧" / "未知"
+                  const sizes = ['movie', 'tv_show', 'unknown'];
+                  const sizeKey = sizes[index];
+                  const sizeBytes = (window.mediaSizeMap && window.mediaSizeMap[sizeKey]) || 0;
+        
+                  return `${type}：${count} 个，${formatSize(sizeBytes)}`;
+                }
+              }
+            }
+          }
+        }
+      });
+    });
+}
+
+function formatSize(bytes) {
+  if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 ** 3)).toFixed(2) + ' GB';
+  if (bytes >= 1024 * 1024) return (bytes / (1024 ** 2)).toFixed(2) + ' MB';
+  if (bytes >= 1024) return (bytes / 1024).toFixed(2) + ' KB';
+  return bytes + ' B';
+}
 // 增加一行路径映射
 function addPath(src='', dst='') {
   const idx = Date.now();
@@ -220,4 +272,8 @@ $(document).on('change', '.config-toggle', function () {
   }).then(r => r.json())
     .then(j => console.log(j.message))
     .catch(e => alert("更新失败：" + e.message));
+});
+
+$(document).ready(function () {
+  loadStats(); // 页面加载时自动加载
 });

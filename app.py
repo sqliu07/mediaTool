@@ -9,6 +9,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from movie_processor import process_movies
 from metadata_fetcher import check_tmdb_connection
+from filename_parser import parse_filename
+
 
 CONFIG_FILE = "configs/config.json"
 
@@ -401,6 +403,45 @@ def toggle_config_enabled(name):
     cfg["enabled"] = data.get("enabled", True)
     save_config(configs)
     return jsonify({"message": f"配置 '{name}' 启用状态已更新为 {cfg['enabled']}"}), 200
+@app.route("/stats", methods=["GET"])
+def media_stats():
+    stats = {
+        "movie": 0,
+        "tv_show": 0,
+        "unknown": 0,
+        "size": {
+            "movie": 0,
+            "tv_show": 0,
+            "unknown": 0
+        }
+    }
+
+    try:
+        configs = load_config()
+        for cfg in configs:
+            paths = cfg.get("paths", [])
+            suffixes = [s.strip().lower() for s in cfg.get("file_suffixes", "").split(",") if s.strip()]
+            for mapping in paths:
+                target = mapping.get("target")
+                if not target or not os.path.exists(target):
+                    continue
+                for root, _, files in os.walk(target):
+                    for file in files:
+                        if not any(file.lower().endswith(s) for s in suffixes):
+                            continue
+                        try:
+                            file_path = os.path.join(root, file)
+                            info = parse_filename(file)
+                            media_type = info.get("type", "unknown")
+                            stats[media_type] = stats.get(media_type, 0) + 1
+                            stats["size"][media_type] += os.path.getsize(file_path)
+                        except Exception as e:
+                            print(f"统计目标路径时解析文件 {file} 出错：{e}")
+        return jsonify(stats)
+    except Exception as e:
+        print(f"[ERROR] 统计接口异常: {e}")
+        return jsonify({"error": str(e)}), 500
+
 
 cfgs = load_config()
 if cfgs:

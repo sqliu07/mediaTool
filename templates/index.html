@@ -40,6 +40,15 @@
   </ul>
 </div>
 
+<hr>
+<h4 class="text-center mt-4">📊 媒体库统计</h4>
+<div class="d-flex justify-content-center">
+  <canvas id="media-chart" style="max-width: 300px; max-height: 300px;"></canvas>
+</div>
+<div class="text-center">
+  <button class="btn btn-sm btn-outline-info mt-2" onclick="loadStats()">重新加载统计</button>
+</div>
+
 <!-- 侧边编辑面板 -->
 <div id="editor-panel">
   <h5>配置编辑</h5>
@@ -127,5 +136,6 @@
 <script src="{{ url_for('static', filename='js/jquery-3.5.1.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>
 </html>
