@@ -99,7 +99,7 @@ def _check_tmdb_connectivity(configs, task_type="任务"):
 def run_scheduled_task():
     """后台定时执行的任务，处理所有配置"""
     logger.info("定时任务开始执行...")
-    configs = load_config()
+    configs = [cfg for cfg in load_config() if cfg.get("enabled", True)]
     if not configs:
         logger.info("没有找到配置，定时任务跳过。")
         return
@@ -294,14 +294,15 @@ def estimate_file_count(cfg):
 def run_all_configs_sequentially_wrapper():
     """按顺序处理所有配置，并在全局 progress 对象中报告累积进度"""
     global progress
-    configs = load_config()
+    configs = [cfg for cfg in load_config() if cfg.get("enabled", True)]
     if not configs:
-        logger.info("没有找到配置，任务跳过。")
+        logger.info("没有启用的配置，任务跳过。")
         progress.update({
             "total": 0, "processed": 0, "success": 0, "failed": 0,
             "completed": True, "errors": []
         })
         return
+
 
     # 初始化
     progress["completed"] = False
@@ -388,6 +389,18 @@ def run_task():
 def get_progress():
     # 使用全局变量中的日志路径
     return jsonify(progress)
+
+@app.route("/toggle_config/<name>", methods=["POST"])
+def toggle_config_enabled(name):
+    configs = load_config()
+    cfg = next((c for c in configs if c["name"] == name), None)
+    if not cfg:
+        return jsonify({"message": "配置未找到"}), 404
+
+    data = request.get_json()
+    cfg["enabled"] = data.get("enabled", True)
+    save_config(configs)
+    return jsonify({"message": f"配置 '{name}' 启用状态已更新为 {cfg['enabled']}"}), 200
 
 cfgs = load_config()
 if cfgs:

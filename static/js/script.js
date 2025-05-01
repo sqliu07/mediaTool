@@ -208,3 +208,16 @@ $(document).on('change', '#cfg-enable-scrape', function () {
     $renameCheckbox.prop('checked', false);
   }
 });
+
+$(document).on('change', '.config-toggle', function () {
+  const name = $(this).data('name');
+  const enabled = this.checked;
+
+  fetch(`/toggle_config/${name}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled})
+  }).then(r => r.json())
+    .then(j => console.log(j.message))
+    .catch(e => alert("更新失败：" + e.message));
+});

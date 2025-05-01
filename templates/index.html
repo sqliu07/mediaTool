@@ -25,7 +25,10 @@
   <ul id="config-list" class="list-group mt-2">
     {% for cfg in configs %}
     <li class="list-group-item d-flex justify-content-between align-items-center">
-      {{ cfg.name }}
+      <div class="form-check">
+        <input class="form-check-input config-toggle" type="checkbox" data-name="{{ cfg.name }}" {% if cfg.enabled != false %}checked{% endif %}>
+        <label class="form-check-label">{{ cfg.name }}</label>
+      </div>
       <div>
         <button class="btn btn-sm btn-outline-secondary mr-2" onclick="editConfig('{{ cfg.name }}')">编辑</button>
         <button class="btn btn-sm btn-outline-danger" onclick="deleteConfig('{{ cfg.name }}')">删除</button>
