@@ -218,7 +218,9 @@ def save_config_route():
         "paths": data["paths"],
         "rename_rule": data.get("rename_rule", ""), # 允许空规则
         "schedule_interval": data.get("schedule_interval", 0),
-        "max_threads": data.get("max_threads", 4) # 可以考虑添加线程数配置
+        "max_threads": data.get("max_threads", 4), # 可以考虑添加线程数配置
+        "scrape_metadata": data.get('scrape_metadata', True),
+        "rename_file": data.get('rename_file', True)
     }
     if existing:
         existing.update(entry)

@@ -30,6 +30,7 @@ $('#btn-new').click(()=>{
   $('#cfg-form')[0].reset();
   $('#cfg-file-type').val('movie'); // 新建时默认为电影
   $('#path-mappings').empty();
+  $('#cfg-enable-scrape').trigger('change');
   addPath();
   openEditor();
 });
@@ -47,7 +48,10 @@ function editConfig(name){
       $('#cfg-rename').val(cfg.rename_rule);
       $('#cfg-interval').val(cfg.schedule_interval || 0);
       $('#path-mappings').empty();
+      $('#cfg-enable-scrape').prop('checked', cfg.scrape_metadata !== false);
+      $('#cfg-enable-rename').prop('checked', cfg.rename_file !== false);
       cfg.paths.forEach(p=> addPath(p.source,p.target));
+      $('#cfg-enable-scrape').trigger('change'); // 联动同步状态
     });
 }
 
@@ -60,6 +64,8 @@ function saveConfig(e){
   const suffixes = $('#cfg-suffixes').val().trim();
   const rename_rule = $('#cfg-rename').val().trim();
   const schedule_interval = parseInt($('#cfg-interval').val(),10) || 0;
+  const scrape_metadata =  $('#cfg-enable-scrape').prop('checked');
+  const rename_file = $('#cfg-enable-rename').prop('checked');
   const paths = [];
   $('#path-mappings .form-row').each(function(){
     const src = $(this).find('input').eq(0).val().trim();
@@ -69,7 +75,10 @@ function saveConfig(e){
   fetch('/save_config',{
     method:'POST', headers:{'Content-Type':'application/json'},
     // 在发送的数据中包含 file_type
-    body: JSON.stringify({name, file_type, tmdb_api_key: tmdb_api_key, file_suffixes: suffixes, paths, rename_rule, schedule_interval})
+    body: JSON.stringify({
+      name, file_type, tmdb_api_key: tmdb_api_key, file_suffixes: suffixes, 
+      paths, rename_rule, schedule_interval,
+      scrape_metadata,rename_file})
   })
   .then(r=>r.json())
   .then(j=>{
@@ -184,4 +193,18 @@ $('#btn-run').click(()=>{
       $('#progress-bar').parent().hide();
       $('#progress-stats').hide();
     });
+});
+
+$(document).on('change', '#cfg-enable-scrape', function () {
+  const isEnabled = this.checked;
+  const $renameCheckbox = $('#cfg-enable-rename');
+  const $renameHint = $('#rename-hint');
+
+  $renameCheckbox.prop('disabled', !isEnabled);
+  $renameHint.toggleClass('text-danger', !isEnabled)
+             .toggleClass('text-muted', isEnabled);
+
+  if (!isEnabled) {
+    $renameCheckbox.prop('checked', false);
+  }
 });
