@@ -207,7 +207,7 @@ def download_poster(metadata, target_dir, media_file_stem):
             with open(poster_path, 'wb') as poster_file:
                 for chunk in response.iter_content(8192): # 增大 chunk size
                     poster_file.write(chunk)
-            app.py下载并保存海报：{poster_path}")
+            logger.info(f"下载并保存海报：{poster_path}")
 
     except requests.exceptions.RequestException as e:
          logger.error(f"下载海报网络请求出错 ({full_url}): {e}")
