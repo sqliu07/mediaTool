@@ -37,18 +37,35 @@ def process_single_file(file_path, config, rel_dir, target_dir):
             if not metadata:
                 return False, f"无法获取元数据：{filename}"
 
-        # 构建占位符
         rename_placeholders = {
-            "title": metadata.get("title", file_info.get("title")) if metadata else file_info.get("title"),
-            "year": (metadata.get("release_date") or file_info.get("year") or "Unknown")[:4] if metadata else file_info.get("year", "Unknown"),
+            "title": metadata.get("title", file_info.get("title")),
+            "year": (metadata.get("release_date") or file_info.get("year") or "Unknown")[:4],
             "season": file_info.get("season", "00"),
             "episode": file_info.get("episode", "00"),
+            "episode_title": ""
         }
-        rename_placeholders["season_episode"] = f"S{rename_placeholders['season']}E{rename_placeholders['episode']}" if (metadata and metadata.get("media_type") == "tv_show") else ""
-        #单集标题
-        rename_placeholders["episode_title"] = metadata.get("episode_title", "").replace(" ", "_")[:50] if metadata else ""
+        rename_placeholders["season_episode"] = (
+            f"S{rename_placeholders['season']}E{rename_placeholders['episode']}"
+            if metadata.get("media_type") == "tv_show" else ""
+        )
 
-        # 文件重命名逻辑
+        # 获取单集元数据（用于 episode_title）
+        if metadata.get("media_type") == "tv_show":
+            episode_info = fetch_episode_metadata(
+                metadata.get("tmdbid"),
+                metadata.get("season") or file_info.get("season", "1"),
+                metadata.get("episode") or file_info.get("episode", "1"),
+                config.get("tmdb_api_key", "")
+            )
+            if episode_info:
+                metadata["episode_title"] = episode_info.get("episode_title", "")
+                rename_placeholders["episode_title"] = episode_info.get("episode_title", "").replace(" ", "_")[:50]
+                metadata["overview"] = episode_info.get("episode_overview") or metadata.get("overview")
+                metadata["release_date"] = episode_info.get("episode_air_date") or metadata.get("release_date")
+                metadata["directors"] = episode_info.get("episode_directors") or metadata.get("directors")
+                metadata["guest_stars"] = episode_info.get("guest_stars", [])
+
+        # 重命名主文件
         new_filename = filename
         if config.get("rename_file", True):
             default_rule = "{title}.{year}" if config_media_type == "movie" else "{title}.{season_episode}"
@@ -63,11 +80,12 @@ def process_single_file(file_path, config, rel_dir, target_dir):
 
             if new_filename != filename and not os.path.exists(new_path):
                 os.rename(dest_path, new_path)
-                logger.info(f"重命名媒体文件：{dest_path} -> {new_path}")
+                logger.info(f"[配置:{config.get('name', '未知')}] 重命名媒体文件：{dest_path} -> {new_path}")
                 dest_path = new_path
 
-            # 重命名已有 nfo 和 poster
             old_base = os.path.splitext(filename)[0]
+            new_base = os.path.splitext(new_filename)[0]
+
             for suffix in [".nfo", "-poster.jpg"]:
                 old_file = os.path.join(dest_dir, old_base + suffix)
                 if os.path.exists(old_file):
@@ -76,65 +94,44 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                         logger.info(f"[配置:{config.get('name')}] 已删除旧附属文件：{old_file}")
                     except Exception as e:
                         logger.warning(f"[配置:{config.get('name')}] 无法删除旧附属文件 {old_file}：{e}")
-            new_base = os.path.splitext(new_filename)[0]
+
             for suffix in [".nfo", "-poster.jpg"]:
                 src = os.path.join(dest_dir, old_base + suffix)
                 dst = os.path.join(dest_dir, new_base + suffix)
-                if os.path.exists(src):
+                if os.path.exists(src) and not os.path.exists(dst):
                     os.rename(src, dst)
                     logger.info(f"[配置:{config.get('name')}] 重命名附属文件：{src} -> {dst}")
 
-        # 如果抓元数据，生成 nfo 和 poster（用最终文件名）
+        # 生成 NFO / poster / thumb
         if config.get("scrape_metadata", True) and metadata:
             base_name_no_ext = os.path.splitext(new_filename)[0]
             nfo_path = os.path.join(dest_dir, base_name_no_ext + ".nfo")
             poster_path = os.path.join(dest_dir, base_name_no_ext + "-poster.jpg")
 
-            logger.info(f"生成 nfo: {nfo_path}")
+            logger.info(f"[配置:{config.get('name', '未知')}] 生成 nfo: {nfo_path}")
+
             if metadata.get("media_type") == "movie":
                 generate_nfo(metadata, nfo_path, original_filename=filename)
             else:
-                # 电视剧，尝试获取 episode 元数据
-                episode_info = fetch_episode_metadata(
-                    metadata.get("tmdbid"),
-                    file_info.get("season", "1"),
-                    file_info.get("episode", "1"),
-                    config.get("tmdb_api_key", "")
-                )
-                # 合并覆盖原 metadata 中的 episode 信息
-                if episode_info:
-                    if episode_info.get("episode_title"):
-                        metadata["episode_title"] = episode_info["episode_title"]
-                    if episode_info.get("episode_overview"):
-                        metadata["overview"] = episode_info["episode_overview"]
-                    if episode_info.get("episode_air_date"):
-                        metadata["release_date"] = episode_info["episode_air_date"]
-                    if episode_info.get("episode_directors"):
-                        metadata["directors"] = episode_info["episode_directors"]
-                    metadata["guest_stars"] = episode_info.get("guest_stars", [])
-
-                    still_path = episode_info.get("still_path")
-                    if still_path:
-                        try:
-                            thumb_url = "https://image.tmdb.org/t/p/w500" + still_path
-                            base_name_no_ext = os.path.splitext(new_filename)[0]
-                            thumb_path = os.path.join(dest_dir, base_name_no_ext + "-thumb.jpg")
-                            if not os.path.exists(thumb_path):
-                                r = requests.get(thumb_url, stream=True, timeout=10)
-                                r.raise_for_status()
-                                with open(thumb_path, "wb") as f:
-                                    for chunk in r.iter_content(8192):
-                                        f.write(chunk)
-                                logger.info(f"成功下载单集缩略图：{thumb_path}")
-                        except Exception as e:
-                            logger.warning(f"下载缩略图失败：{e}")
-
                 generate_tv_nfo(metadata, nfo_path, original_filename=filename)
-                
+
+                still_path = episode_info.get("still_path") if episode_info else None
+                if still_path:
+                    try:
+                        thumb_url = "https://image.tmdb.org/t/p/w500" + still_path
+                        thumb_path = os.path.join(dest_dir, base_name_no_ext + "-thumb.jpg")
+                        if not os.path.exists(thumb_path):
+                            r = requests.get(thumb_url, stream=True, timeout=10)
+                            r.raise_for_status()
+                            with open(thumb_path, "wb") as f:
+                                for chunk in r.iter_content(8192):
+                                    f.write(chunk)
+                            logger.info(f"[配置:{config.get('name', '未知')}] 下载单集缩略图：{thumb_path}")
+                    except Exception as e:
+                        logger.warning(f"[配置:{config.get('name', '未知')}] 下载缩略图失败：{e}")
 
             download_poster(metadata, dest_dir, base_name_no_ext)
 
-                # 额外处理：如果是电视剧并且还未生成 tvshow.nfo，则生成整部剧的 nfo 和 poster.jpg
             if metadata.get("media_type") == "tv_show":
                 tvshow_nfo_path = os.path.join(dest_dir, "tvshow.nfo")
                 tvshow_poster_path = os.path.join(dest_dir, "poster.jpg")
@@ -145,14 +142,13 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                     try:
                         if os.path.exists(temp_path):
                             os.rename(temp_path, tvshow_poster_path)
-                            logger.info(f"重命名剧集封面：{temp_path} -> {tvshow_poster_path}")
+                            logger.info(f"[配置:{config.get('name', '未知')}] 重命名剧集封面：{temp_path} -> {tvshow_poster_path}")
                     except Exception as e:
-                        logger.warning(f"重命名 poster.jpg 失败：{e}")  
+                        logger.warning(f"[配置:{config.get('name', '未知')}] 重命名 poster.jpg 失败：{e}")
 
         return True, ""
-
     except Exception as e:
-        logger.exception(f"处理文件 {file_path} 出错：{e}")
+        logger.error(f"[配置:{config.get('name', '未知')}] 处理文件 {file_path} 出错：{e}")
         return False, str(e)
 
 def process_movies(config_or_download_dir, target_dir=None, tmdb_api_key=None, progress_callback=None):

@@ -150,15 +150,18 @@ def fetch_metadata(media_name, year, tmdb_api_key, media_type='movie'):
         videos_data = data.get("videos", {})
 
         # 演职员
-        result["cast"] = [
-            {
+        result["cast"] = []
+        for c in credits.get("cast", [])[:20]:
+            actor_id = c["id"]
+            profile_path = c.get("profile_path")
+            result["cast"].append({
                 "name": c["name"],
                 "character": c.get("character", ""),
-                "profile_path": c.get("profile_path"),
-                "id": c["id"]
-            }
-            for c in credits.get("cast", [])[:20] # 取前20个演员
-        ]
+                "profile_path": profile_path,
+                "tmdb_id": actor_id,
+                "profile_url": f"https://www.themoviedb.org/person/{actor_id}",
+                "thumb": f"https://image.tmdb.org/t/p/w185{profile_path}" if profile_path else ""
+            })
         crew = credits.get("crew", [])
         result["directors"] = [{"name": p["name"], "id": p["id"]} for p in crew if p.get("job") == "Director"]
         # 电视剧可能有 'Executive Producer' 作为主要创作人
@@ -221,6 +224,7 @@ def fetch_episode_metadata(tv_id, season, episode, api_key):
     """
     从 TMDB 获取单集元数据（标题、简介、首播日期等）。
     """
+    logger.debug(f"调用 fetch_episode_metadata: season={season}, episode={episode}")
     url = f"https://api.themoviedb.org/3/tv/{tv_id}/season/{season}/episode/{episode}"
     params = {
         "api_key": api_key,

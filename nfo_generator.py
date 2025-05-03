@@ -61,8 +61,9 @@ def generate_nfo(metadata, nfo_path, original_filename=""):
             _add_sub_element(actor_elem, "name", actor.get("name"))
             _add_sub_element(actor_elem, "role", actor.get("character"))
             # 可以选择性添加演员头像路径（如果需要）
-            # if actor.get("profile_path"):
-            #     _add_sub_element(actor_elem, "thumb", f"https://image.tmdb.org/t/p/w185{actor.get('profile_path')}")
+            _add_sub_element(actor_elem, "tmdbid", actor.get("tmdb_id"))
+            _add_sub_element(actor_elem, "profile_url", actor.get("profile_url"))
+            _add_sub_element(actor_elem, "thumb", actor.get("thumb"))
 
         # 电影集信息
         if metadata.get("collection"):
@@ -141,7 +142,9 @@ def generate_tv_nfo(metadata, nfo_path, original_filename=""):
             actor_elem = ET.SubElement(root, "actor")
             _add_sub_element(actor_elem, "name", actor.get("name"))
             _add_sub_element(actor_elem, "role", actor.get("character"))
-            # TODO: 获取单集特定演员或嘉宾 (Guest Stars)
+            _add_sub_element(actor_elem, "tmdbid", actor.get("tmdb_id"))
+            _add_sub_element(actor_elem, "profile_url", actor.get("profile_url"))
+            _add_sub_element(actor_elem, "thumb", actor.get("thumb"))
 
         base_name_no_ext = os.path.splitext(os.path.basename(nfo_path))[0]
         thumb_filename = base_name_no_ext + "-thumb.jpg"
@@ -197,6 +200,9 @@ def generate_tvshow_nfo(metadata, nfo_path):
             actor_elem = ET.SubElement(root, "actor")
             _add_sub_element(actor_elem, "name", actor.get("name"))
             _add_sub_element(actor_elem, "role", actor.get("character"))
+            _add_sub_element(actor_elem, "tmdbid", actor.get("tmdb_id"))
+            _add_sub_element(actor_elem, "profile_url", actor.get("profile_url"))
+            _add_sub_element(actor_elem, "thumb", actor.get("thumb"))
 
         # 写入文件
         xml_str = _pretty_print_xml(root)
