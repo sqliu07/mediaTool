@@ -28,14 +28,14 @@ MediaTool 是一个基于 Flask + JavaScript 的本地媒体文件管理工具�
 1. 克隆项目：
 
 ```bash
-git clone https://github.com/yourname/media-tool.git
+git clone https://github.com/yourname/mediaTool.git
 cd media-tool
 ```
 
 2. 构建镜像：
 
 ```bash
-docker build -t media-tool .
+docker build -t mediatool .
 ```
 
 3. 启动容器：
@@ -44,7 +44,7 @@ docker build -t media-tool .
 docker run -d -p 5001:5001 -v /your/media:/media \
   -e TZ=Asia/Shanghai \
   -e SECRET_KEY=your-secure-key \
-  --name media-tool media-tool
+  --name mediatool mediatool
 ```
 
 你可以绑定宿主机媒体路径并设置时区与密钥。
