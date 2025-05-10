@@ -133,6 +133,7 @@ def fetch_metadata(media_name, year, tmdb_api_key, media_type='movie'):
             "vote_average": data.get("vote_average"),
             "vote_count": data.get("vote_count"),
             "poster_path": data.get("poster_path"),
+            "fanart_path": data.get("backdrop_path"),
             "imdb_id": data.get("external_ids", {}).get("imdb_id") if not is_movie else data.get("imdb_id"), # 电视剧的imdb id在external_ids里
             "collection": { # 电视剧没有 collection
                 "name": data["belongs_to_collection"]["name"],
@@ -143,7 +144,18 @@ def fetch_metadata(media_name, year, tmdb_api_key, media_type='movie'):
             "number_of_episodes": data.get("number_of_episodes") if not is_movie else None,
             "status": data.get("status"), # "Returning Series", "Ended", etc.
         })
-
+        result["clearlogo_path"] = None
+        try:
+            images_url = f"https://api.themoviedb.org/3/{tmdb_media_type}/{media_id}/images"
+            images_resp = requests.get(images_url, params={"api_key": tmdb_api_key}, timeout=10)
+            images_resp.raise_for_status()
+            logos = images_resp.json().get("logos", [])
+            for logo in logos:
+                if logo.get("iso_639_1") == "en":  # 或判断为 zh, 看需求
+                    result["clearlogo_path"] = logo.get("file_path")
+                    break
+        except Exception as e:
+            logger.warning(f"获取 clearlogo 失败：{e}")
         # Step 3, 4, 5: 获取演职员、关键词、预告片 (使用 append_to_response 一次性获取)
         credits = data.get("credits", {})
         keywords_data = data.get("keywords", {})
@@ -219,6 +231,58 @@ def download_poster(metadata, target_dir, media_file_stem):
     except Exception as e:
         logger.error(f"下载海报时发生未知错误：{e}")
     return poster_path
+
+def download_images(metadata, dest_dir, base_name_no_ext):
+    media_type = metadata.get("media_type", "movie")
+
+    # 下载 poster（适用于电影和剧集）
+    poster_path = metadata.get("poster_path")
+    if poster_path:
+        try:
+            poster_url = "https://image.tmdb.org/t/p/original" + poster_path
+            poster_dest = os.path.join(dest_dir, base_name_no_ext + "-poster.jpg")
+            if not os.path.exists(poster_dest):
+                r = requests.get(poster_url, stream=True, timeout=10)
+                r.raise_for_status()
+                with open(poster_dest, "wb") as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
+                logger.info(f"成功下载 poster：{poster_dest}, media_type:{media_type}")
+        except Exception as e:
+            logger.warning(f"下载 poster 失败：{e}")
+
+    # 若是电影才下载 fanart 和 clearlogo
+    if media_type == "movie":
+        fanart_path = metadata.get("fanart_path")
+        if fanart_path:
+            try:
+                fanart_url = "https://image.tmdb.org/t/p/original" + fanart_path
+                fanart_dest = os.path.join(dest_dir, base_name_no_ext + "-fanart.jpg")
+                if not os.path.exists(fanart_dest):
+                    r = requests.get(fanart_url, stream=True, timeout=10)
+                    r.raise_for_status()
+                    with open(fanart_dest, "wb") as f:
+                        for chunk in r.iter_content(8192):
+                            f.write(chunk)
+                    logger.info(f"成功下载 fanart：{fanart_dest}")
+            except Exception as e:
+                logger.warning(f"下载 fanart 失败：{e}")
+
+        clearlogo_path = metadata.get("clearlogo_path")
+        if clearlogo_path:
+            try:
+                logo_url = "https://image.tmdb.org/t/p/original" + clearlogo_path
+                logo_dest = os.path.join(dest_dir, base_name_no_ext + "-clearlogo.png")
+                if not os.path.exists(logo_dest):
+                    r = requests.get(logo_url, stream=True, timeout=10)
+                    r.raise_for_status()
+                    with open(logo_dest, "wb") as f:
+                        for chunk in r.iter_content(8192):
+                            f.write(chunk)
+                    logger.info(f"成功下载 clearlogo：{logo_dest}")
+            except Exception as e:
+                logger.warning(f"下载 clearlogo 失败：{e}")
+
 
 def fetch_episode_metadata(tv_id, season, episode, api_key):
     """

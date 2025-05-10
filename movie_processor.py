@@ -1,5 +1,5 @@
 from common_imports import *
-from metadata_fetcher import fetch_metadata_cached, fetch_episode_metadata, download_poster
+from metadata_fetcher import fetch_metadata_cached, fetch_episode_metadata, download_poster, download_images
 from nfo_generator import generate_nfo, generate_tv_nfo, generate_tvshow_nfo
 from filename_parser import parse_filename
 
@@ -7,6 +7,32 @@ logger = logging.getLogger(__name__)
 
 def process_single_file(file_path, config, rel_dir, target_dir):
     try:
+        filename = os.path.basename(file_path)
+        dest_dir = os.path.join(target_dir, rel_dir)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        # === 处理记录检查 ===
+        record_path = os.path.join("configs", "processed.txt")
+        os.makedirs(os.path.dirname(record_path), exist_ok=True)
+        if os.path.exists(record_path):
+            with open(record_path, "r", encoding="utf-8") as f:
+                if file_path.strip() in f.read():
+                    logger.info(f"[配置:{config.get('name')}] 已记录处理过该文件，跳过：{file_path}")
+                    return True, ""
+
+        # === inode 检查 ===
+        try:
+            source_inode = os.stat(file_path).st_ino
+            for fname in os.listdir(dest_dir):
+                fpath = os.path.join(dest_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                if os.stat(fpath).st_ino == source_inode:
+                    logger.info(f"[配置:{config.get('name')}] 已存在硬链接目标文件，跳过：{file_path}")
+                    return True, ""
+        except Exception as e:
+            logger.warning(f"[inode 检查失败]：{e}")
+
         filename = os.path.basename(file_path)
         dest_dir = os.path.join(target_dir, rel_dir)
         os.makedirs(dest_dir, exist_ok=True)
@@ -71,7 +97,7 @@ def process_single_file(file_path, config, rel_dir, target_dir):
             default_rule = "{title}.{year}" if config_media_type == "movie" else "{title}.{season_episode}"
             rename_rule = config.get("rename_rule", default_rule)
             try:
-                base = rename_rule.format(**rename_placeholders)
+                base = rename_rule.format(**rename_placeholders).rstrip(".")
             except KeyError as e:
                 logger.warning(f"[配置:{config.get('name')}] 重命名规则错误：{e}，使用默认")
                 base = default_rule.format(**rename_placeholders)
@@ -130,7 +156,7 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                     except Exception as e:
                         logger.warning(f"[配置:{config.get('name', '未知')}] 下载缩略图失败：{e}")
 
-            download_poster(metadata, dest_dir, base_name_no_ext)
+            download_images(metadata, dest_dir, base_name_no_ext)
 
             if metadata.get("media_type") == "tv_show":
                 tvshow_nfo_path = os.path.join(dest_dir, "tvshow.nfo")
@@ -146,6 +172,8 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                     except Exception as e:
                         logger.warning(f"[配置:{config.get('name', '未知')}] 重命名 poster.jpg 失败：{e}")
 
+        with open(record_path, "a", encoding="utf-8") as f:
+            f.write(file_path.strip() + "\n")
         return True, ""
     except Exception as e:
         logger.error(f"[配置:{config.get('name', '未知')}] 处理文件 {file_path} 出错：{e}")
