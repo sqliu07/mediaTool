@@ -356,36 +356,47 @@ def run_all_configs_sequentially_wrapper():
 
 @app.route("/run_task", methods=["POST"])
 def run_task():
-    """手动触发任务，顺序处理所有配置"""
+    """手动触发任务，顺序处理所有启用的配置"""
     global progress
     configs = load_config()
     if not configs:
         return jsonify({"message": "没有可用的配置"}), 400
 
-    try:
-        # --- 使用辅助函数检查 TMDB 连接 ---
-        _check_tmdb_connectivity(configs, task_type="手动任务")
-        # --- 检查通过，继续执行 ---
-    except (TMDBConnectionError, TMDBApiKeyMissingError) as e: # <--- 合并两个异常类型
-        # 连接失败或 Key 缺失
-        return jsonify({"message": str(e)}), 503 # 返回具体的错误消息
-    except TMDBError as e: # 捕获其他可能的 TMDB 错误 (如果未来添加)
-         logger.error(f"TMDB 检查时发生未知错误: {e}", exc_info=True) # 添加日志记录
-         return jsonify({"message": f"TMDB 检查时发生未知错误: {e}"}), 500
-    # --- 检查结束 ---
+    enabled_configs = [cfg for cfg in configs if cfg.get("enabled", True)]
 
-    # 清零进度 (将在 wrapper 中重新初始化)
-    progress["total"] = 0
-    progress["processed"] = 0
-    progress["success"] = 0
-    progress["failed"] = 0
-    progress["completed"] = False
-    progress["errors"] = []
+    if not enabled_configs:
+        return jsonify({"message": "没有启用的配置"}), 400
 
-    # 后台运行新的 wrapper 函数
+    # 判断是否至少有一个配置启用了抓取元数据或重命名
+    need_tmdb_check = any(
+        cfg.get("scrape_metadata", True) or cfg.get("rename_file", True)
+        for cfg in enabled_configs
+    )
+
+    if need_tmdb_check:
+        try:
+            _check_tmdb_connectivity(enabled_configs, task_type="手动任务")
+        except (TMDBConnectionError, TMDBApiKeyMissingError) as e:
+            return jsonify({"message": str(e)}), 503
+        except TMDBError as e:
+            logger.error(f"TMDB 检查时发生未知错误: {e}", exc_info=True)
+            return jsonify({"message": f"TMDB 检查时发生未知错误: {e}"}), 500
+
+    # 初始化进度对象
+    progress.update({
+        "total": 0,
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "completed": False,
+        "errors": []
+    })
+
+    # 启动任务线程
     thread = Thread(target=run_all_configs_sequentially_wrapper)
     thread.start()
     return jsonify({"message": "任务已启动，将按顺序处理所有配置。"}), 202
+
 
 @app.route("/progress", methods=["GET"])
 def get_progress():
@@ -403,6 +414,60 @@ def toggle_config_enabled(name):
     cfg["enabled"] = data.get("enabled", True)
     save_config(configs)
     return jsonify({"message": f"配置 '{name}' 启用状态已更新为 {cfg['enabled']}"}), 200
+
+@app.route("/run_config/<name>", methods=["POST"])
+def run_single_config(name):
+    """执行指定配置"""
+    global progress
+    all_configs = load_config()
+    cfg = next((c for c in all_configs if c.get("name") == name and c.get("enabled", True)), None)
+    if not cfg:
+        return jsonify({"message": f"未找到启用的配置：{name}"}), 404
+
+    if cfg.get("scrape_metadata", True) or cfg.get("rename_file", True):
+        try:
+            _check_tmdb_connectivity([cfg], task_type=f"配置 {name}")
+        except TMDBError as e:
+            return jsonify({"message": str(e)}), 503
+
+    # 初始化进度
+    progress.update({
+        "total": 0,
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "completed": False,
+        "errors": []
+    })
+
+    # 定义回调函数
+    def progress_callback(stage, amount, success=None, error=None):
+        if stage == "initialize":
+            progress["total"] = amount
+        elif stage == "update":
+            progress["processed"] += amount
+            if success:
+                progress["success"] += 1
+            else:
+                progress["failed"] += 1
+                if error:
+                    progress["errors"].append(error)
+        elif stage == "complete":
+            progress["completed"] = True
+
+    def run_one():
+        logger.info(f"开始执行配置：{name}")
+        try:
+            process_movies(cfg, progress_callback=progress_callback)
+        except Exception as e:
+            logger.error(f"执行配置 {name} 时发生错误：{e}", exc_info=True)
+            progress["completed"] = True
+        logger.info(f"配置 {name} 执行完成")
+
+    Thread(target=run_one).start()
+    return jsonify({"message": f"配置 {name} 已启动"}), 202
+
+
 @app.route("/stats", methods=["GET"])
 def media_stats():
     stats = {
@@ -451,4 +516,4 @@ if cfgs:
 # --- 以下仅供开发时本地调试 ---
 if __name__ == "__main__":
     print("[调试模式] 使用 Flask 自带服务器启动...")
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    app.run(host="0.0.0.0", port=5002, debug=True)

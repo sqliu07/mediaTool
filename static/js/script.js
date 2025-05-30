@@ -140,6 +140,40 @@ function saveConfig(e){
   });
 }
 
+function runSingleConfig(name) {
+
+  // 打开进度模态框并初始化
+  $('#progressModal').modal('show');
+  $('#progress-bar').css('width','0%').text('0%');
+  $('#progress-text').text('等待开始...');
+  $('#success-count').text('0');
+  $('#failed-count').text('0');
+  $('#error-details').empty();
+  $('#error-list').hide();
+  $('#complete-message').hide().removeClass('alert-danger alert-success alert-warning');
+
+  // 发送请求执行指定配置
+  fetch(`/run_config/${name}`, { method: 'POST' })
+    .then(response => {
+      if (!response.ok) return response.json().then(e => { throw new Error(e.message || '执行失败'); });
+      return response.json();
+    })
+    .then(() => {
+      $('#progress-text').text('任务已启动，正在获取进度...');
+      // 开始轮询进度（可复用你已有的轮询逻辑）
+      startProgressPolling();
+    })
+    .catch(error => {
+      const msgDiv = $('#complete-message');
+      msgDiv.removeClass('alert-success alert-warning').addClass('alert-danger')
+           .html(`任务启动失败：${error.message}`)
+           .show();
+      $('#progress-bar').parent().hide();
+      $('#progress-stats').hide();
+    });
+}
+
+
 // 启动任务并监控进度
 $('#btn-run').click(()=>{
   // 重置进度显示
@@ -277,3 +311,73 @@ $(document).on('change', '.config-toggle', function () {
 $(document).ready(function () {
   loadStats(); // 页面加载时自动加载
 });
+
+function startProgressPolling() {
+  let startTime = Date.now();
+  let lastProcessed = -1;
+
+  const timer = setInterval(() => {
+    fetch('/progress')
+      .then(r => r.json())
+      .then(p => {
+        if (p.processed >= lastProcessed) {
+          const pct = p.total > 0 ? Math.floor(p.processed * 100 / p.total) : 0;
+          $('#progress-bar').css('width', pct + '%').text(pct + '%');
+          $('#progress-text').text(`${p.processed} / ${p.total}`);
+          const elapsedMs = Date.now() - startTime;
+          const elapsedSec = Math.floor(elapsedMs / 1000);
+          const hours = String(Math.floor(elapsedSec / 3600)).padStart(2, '0');
+          const minutes = String(Math.floor((elapsedSec % 3600) / 60)).padStart(2, '0');
+          const seconds = String(elapsedSec % 60).padStart(2, '0');
+          $('#elapsed-time').text(`耗时：${hours}:${minutes}:${seconds}`);
+          $('#success-count').text(p.success || 0);
+          $('#failed-count').text(p.failed || 0);
+
+          // 错误列表
+          if (p.errors && p.errors.length > 0) {
+            const errorList = $('#error-details');
+            errorList.empty();
+            p.errors.forEach(error => {
+              const configName = error.config_name ? `[${error.config_name}] ` : '';
+              errorList.append(`
+                <li class="mb-2">
+                  <strong>${configName}${error.file}</strong><br>
+                  <code>${error.message}</code>
+                </li>
+              `);
+            });
+            $('#error-list').show();
+          } else {
+            $('#error-list').hide();
+          }
+
+          lastProcessed = p.processed;
+        }
+
+        if (p.completed || (p.processed >= p.total && p.total > 0)) {
+          clearInterval(timer);
+          const failed = p.failed || 0;
+          const msgDiv = $('#complete-message');
+          const logPath = p.log_path || '/logs/media_manager.log';
+
+          if (failed === 0 && (!p.errors || p.errors.length === 0)) {
+            msgDiv.removeClass('alert-warning alert-danger').addClass('alert-success')
+              .html('任务完成，所有文件处理成功。');
+          } else {
+            msgDiv.removeClass('alert-success alert-danger').addClass('alert-warning')
+              .html(`任务完成，有 ${failed} 个失败。<br>日志路径: <code>${logPath}</code>`);
+          }
+          msgDiv.show();
+        }
+      })
+      .catch(progressError => {
+        console.error("进度获取失败:", progressError);
+        clearInterval(timer);
+        const msgDiv = $('#complete-message');
+        msgDiv.removeClass('alert-success alert-warning').addClass('alert-danger')
+          .html(`获取任务进度失败：${progressError.message}`)
+          .show();
+      });
+  }, 1000);
+}
+

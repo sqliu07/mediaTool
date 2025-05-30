@@ -4,45 +4,36 @@ from nfo_generator import generate_nfo, generate_tv_nfo, generate_tvshow_nfo
 from filename_parser import parse_filename
 
 logger = logging.getLogger(__name__)
-
-def process_single_file(file_path, config, rel_dir, target_dir):
+def load_processed_set():
+    path = os.path.join("configs", "processed.txt")
+    if not os.path.exists(path):
+        return set()
+    with open(path, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f if line.strip())
+def process_single_file(file_path, config, rel_dir, target_dir, processed_set=None):
     try:
         filename = os.path.basename(file_path)
+        config_name = config.get("name", "未知")
         dest_dir = os.path.join(target_dir, rel_dir)
-        os.makedirs(dest_dir, exist_ok=True)
+        # 判断是否已处理
+        if processed_set is not None and file_path.strip() in processed_set:
+            logger.info(f"[配置:{config_name}] 已处理文件，跳过写入：{file_path}")
+            return True, "重复文件跳过"
+        # === 只做硬链接（不抓元数据也不重命名） ===
+        if not config.get("scrape_metadata", True) and not config.get("rename_file", True):
+            dest_path = create_hardlink_if_needed(file_path, dest_dir, config_name)
+            if not dest_path:
+                return None  # 跳过记录，跳过计数
+            
+            record_path = os.path.join("configs", "processed.txt")
+            os.makedirs(os.path.dirname(record_path), exist_ok=True)
+            with open(record_path, "a", encoding="utf-8") as f:
+                f.write(file_path.strip() + "\n")
+            
+            return True, ""
 
-        # === 处理记录检查 ===
-        record_path = os.path.join("configs", "processed.txt")
-        os.makedirs(os.path.dirname(record_path), exist_ok=True)
-        if os.path.exists(record_path):
-            with open(record_path, "r", encoding="utf-8") as f:
-                if file_path.strip() in f.read():
-                    logger.info(f"[配置:{config.get('name')}] 已记录处理过该文件，跳过：{file_path}")
-                    return True, ""
-
-        # === inode 检查 ===
-        try:
-            source_inode = os.stat(file_path).st_ino
-            for fname in os.listdir(dest_dir):
-                fpath = os.path.join(dest_dir, fname)
-                if not os.path.isfile(fpath):
-                    continue
-                if os.stat(fpath).st_ino == source_inode:
-                    logger.info(f"[配置:{config.get('name')}] 已存在硬链接目标文件，跳过：{file_path}")
-                    return True, ""
-        except Exception as e:
-            logger.warning(f"[inode 检查失败]：{e}")
-
-        filename = os.path.basename(file_path)
-        dest_dir = os.path.join(target_dir, rel_dir)
-        os.makedirs(dest_dir, exist_ok=True)
-
-        dest_path = os.path.join(dest_dir, filename)
-        if not os.path.exists(dest_path):
-            os.link(file_path, dest_path)
-            logger.info(f"[配置:{config.get('name', '未知')}] 创建硬链接：{dest_path}")
-        else:
-            logger.info(f"[配置:{config.get('name', '未知')}] 硬链接已存在：{dest_path}")
+        # === 正常流程 ===
+        dest_path = create_hardlink_if_needed(file_path, dest_dir, config_name)
 
         file_info = parse_filename(filename)
         if not file_info:
@@ -72,11 +63,11 @@ def process_single_file(file_path, config, rel_dir, target_dir):
         }
         rename_placeholders["season_episode"] = (
             f"S{rename_placeholders['season']}E{rename_placeholders['episode']}"
-            if metadata.get("media_type") == "tv_show" else ""
+            if metadata and metadata.get("media_type") == "tv_show" else ""
         )
 
-        # 获取单集元数据（用于 episode_title）
-        if metadata.get("media_type") == "tv_show":
+        episode_info = None
+        if metadata and metadata.get("media_type") == "tv_show":
             episode_info = fetch_episode_metadata(
                 metadata.get("tmdbid"),
                 metadata.get("season") or file_info.get("season", "1"),
@@ -91,7 +82,6 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                 metadata["directors"] = episode_info.get("episode_directors") or metadata.get("directors")
                 metadata["guest_stars"] = episode_info.get("guest_stars", [])
 
-        # 重命名主文件
         new_filename = filename
         if config.get("rename_file", True):
             default_rule = "{title}.{year}" if config_media_type == "movie" else "{title}.{season_episode}"
@@ -99,48 +89,23 @@ def process_single_file(file_path, config, rel_dir, target_dir):
             try:
                 base = rename_rule.format(**rename_placeholders).rstrip(".")
             except KeyError as e:
-                logger.warning(f"[配置:{config.get('name')}] 重命名规则错误：{e}，使用默认")
+                logger.warning(f"[配置:{config_name}] 重命名规则错误：{e}，使用默认")
                 base = default_rule.format(**rename_placeholders)
             new_filename = base + os.path.splitext(filename)[1]
             new_path = os.path.join(dest_dir, new_filename)
 
             if new_filename != filename and not os.path.exists(new_path):
                 os.rename(dest_path, new_path)
-                logger.info(f"[配置:{config.get('name', '未知')}] 重命名媒体文件：{dest_path} -> {new_path}")
+                logger.info(f"[配置:{config_name}] 重命名媒体文件：{dest_path} -> {new_path}")
                 dest_path = new_path
 
-            old_base = os.path.splitext(filename)[0]
-            new_base = os.path.splitext(new_filename)[0]
-
-            for suffix in [".nfo", "-poster.jpg"]:
-                old_file = os.path.join(dest_dir, old_base + suffix)
-                if os.path.exists(old_file):
-                    try:
-                        os.remove(old_file)
-                        logger.info(f"[配置:{config.get('name')}] 已删除旧附属文件：{old_file}")
-                    except Exception as e:
-                        logger.warning(f"[配置:{config.get('name')}] 无法删除旧附属文件 {old_file}：{e}")
-
-            for suffix in [".nfo", "-poster.jpg"]:
-                src = os.path.join(dest_dir, old_base + suffix)
-                dst = os.path.join(dest_dir, new_base + suffix)
-                if os.path.exists(src) and not os.path.exists(dst):
-                    os.rename(src, dst)
-                    logger.info(f"[配置:{config.get('name')}] 重命名附属文件：{src} -> {dst}")
-
-        # 生成 NFO / poster / thumb
+        base_name_no_ext = os.path.splitext(new_filename)[0]
         if config.get("scrape_metadata", True) and metadata:
-            base_name_no_ext = os.path.splitext(new_filename)[0]
             nfo_path = os.path.join(dest_dir, base_name_no_ext + ".nfo")
-            poster_path = os.path.join(dest_dir, base_name_no_ext + "-poster.jpg")
-
-            logger.info(f"[配置:{config.get('name', '未知')}] 生成 nfo: {nfo_path}")
-
             if metadata.get("media_type") == "movie":
                 generate_nfo(metadata, nfo_path, original_filename=filename)
             else:
                 generate_tv_nfo(metadata, nfo_path, original_filename=filename)
-
                 still_path = episode_info.get("still_path") if episode_info else None
                 if still_path:
                     try:
@@ -152,9 +117,9 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                             with open(thumb_path, "wb") as f:
                                 for chunk in r.iter_content(8192):
                                     f.write(chunk)
-                            logger.info(f"[配置:{config.get('name', '未知')}] 下载单集缩略图：{thumb_path}")
+                        logger.info(f"[配置:{config_name}] 下载单集缩略图：{thumb_path}")
                     except Exception as e:
-                        logger.warning(f"[配置:{config.get('name', '未知')}] 下载缩略图失败：{e}")
+                        logger.warning(f"[配置:{config_name}] 下载缩略图失败：{e}")
 
             download_images(metadata, dest_dir, base_name_no_ext)
 
@@ -165,19 +130,22 @@ def process_single_file(file_path, config, rel_dir, target_dir):
                     generate_tvshow_nfo(metadata, tvshow_nfo_path)
                 if not os.path.exists(tvshow_poster_path):
                     temp_path = download_poster(metadata, dest_dir, "tvshow")
-                    try:
-                        if os.path.exists(temp_path):
+                    if temp_path and os.path.exists(temp_path):
+                        try:
                             os.rename(temp_path, tvshow_poster_path)
-                            logger.info(f"[配置:{config.get('name', '未知')}] 重命名剧集封面：{temp_path} -> {tvshow_poster_path}")
-                    except Exception as e:
-                        logger.warning(f"[配置:{config.get('name', '未知')}] 重命名 poster.jpg 失败：{e}")
+                        except Exception as e:
+                            logger.warning(f"[配置:{config_name}] 重命名 poster.jpg 失败：{e}")
 
+        record_path = os.path.join("configs", "processed.txt")
+        os.makedirs(os.path.dirname(record_path), exist_ok=True)
         with open(record_path, "a", encoding="utf-8") as f:
             f.write(file_path.strip() + "\n")
+
         return True, ""
     except Exception as e:
         logger.error(f"[配置:{config.get('name', '未知')}] 处理文件 {file_path} 出错：{e}")
         return False, str(e)
+
 
 def process_movies(config_or_download_dir, target_dir=None, tmdb_api_key=None, progress_callback=None):
     if isinstance(config_or_download_dir, dict):
@@ -206,9 +174,11 @@ def process_movies(config_or_download_dir, target_dir=None, tmdb_api_key=None, p
 
     total = len(tasks)
     if progress_callback: progress_callback("initialize", total)
+    processed_set = load_processed_set()
 
     with ThreadPoolExecutor(max_workers=config.get("max_threads", 4)) as exe:
-        futures = {exe.submit(process_single_file, f, config, rel, tgt): f for f, rel, tgt in tasks}
+        
+        futures = {exe.submit(process_single_file, f, config, rel, tgt, processed_set): f for f, rel, tgt in tasks}
         for fut in as_completed(futures):
             f = futures[fut]
             try:
@@ -226,3 +196,43 @@ def process_movies(config_or_download_dir, target_dir=None, tmdb_api_key=None, p
 
     if progress_callback: progress_callback("complete", 0)
     logger.info(f"[配置:{config.get('name', '未知')}] 总共处理：{total}，失败：{len(failed)}")
+
+def create_hardlink_if_needed(src_path, dest_dir, config_name):
+    """
+    创建硬链接（如目标已存在则跳过），返回 (最终路径或 None, 消息)。
+    """
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        filename = os.path.basename(src_path)
+        dest_path = os.path.join(dest_dir, filename)
+
+        # 源 inode
+        try:
+            source_inode = os.stat(src_path).st_ino
+        except Exception as e:
+            logger.warning(f"[配置:{config_name}] 获取源 inode 失败：{e}")
+            source_inode = None
+
+        # 目录内查找相同 inode
+        if source_inode:
+            for fname in os.listdir(dest_dir):
+                fpath = os.path.join(dest_dir, fname)
+                try:
+                    if os.path.isfile(fpath) and os.stat(fpath).st_ino == source_inode:
+                        logger.info(f"[配置:{config_name}] 已存在硬链接目标文件，跳过：{src_path}")
+                        return None, "硬链接已存在"
+                except Exception:
+                    continue
+
+        if os.path.exists(dest_path):
+            logger.info(f"[配置:{config_name}] 目标路径已存在但 inode 不同，跳过：{dest_path}")
+            return None, "同名文件已存在"
+
+        os.link(src_path, dest_path)
+        logger.info(f"[配置:{config_name}] 创建硬链接：{dest_path}")
+        return dest_path, ""
+    except Exception as e:
+        logger.error(f"[配置:{config_name}] 创建硬链接失败：{e}")
+        raise
+
+
