@@ -3,6 +3,8 @@ from metadata_fetcher import fetch_metadata_cached, fetch_episode_metadata, down
 from nfo_generator import generate_nfo, generate_tv_nfo, generate_tvshow_nfo
 from filename_parser import parse_filename
 
+import subprocess
+
 logger = logging.getLogger(__name__)
 def load_processed_set():
     path = os.path.join("configs", "processed.txt")
@@ -11,6 +13,12 @@ def load_processed_set():
     with open(path, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 def process_single_file(file_path, config, rel_dir, target_dir, processed_set=None):
+    try:
+        logger.info(f"[设置目录权限:{target_dir}]")
+        subprocess.run(['chmod', '-R', '777', target_dir], check=True)
+        logger.info(f"[设置目录权限成功]")
+    except subprocess.CalledProcessError as e:
+            logger.error(f"[设置目录权限失败]：{e}")
     try:
         filename = os.path.basename(file_path)
         config_name = config.get("name", "未知")
