@@ -17,6 +17,8 @@ from movie_processor import (
     DEFAULT_DIR_MODE,
     DEFAULT_FILE_MODE,
     DEFAULT_FILE_SUFFIXES,
+    MEDIA_TYPES,
+    MEDIA_TYPE_MOVIE,
     STATUS_FAILED,
     apply_permission_tree,
     collect_tasks,
@@ -344,7 +346,8 @@ def save_config_route():
     existing = next((c for c in configs if c.get("name") == name), None)
     entry = {
         "name": name,
-        "file_type": data.get("file_type", "movie"),
+        "file_type": (data.get("file_type") if data.get("file_type") in MEDIA_TYPES
+                      else MEDIA_TYPE_MOVIE),
         "file_suffixes": suffixes,
         "tmdb_api_key": (data.get("tmdb_api_key") or "").strip(),
         "paths": paths,
@@ -525,18 +528,18 @@ def media_stats():
     - 判断不出（如 Iron Man.mkv）：用该配置的「媒体类型」兜底，并计入 fallback
     """
     stats = {
-        "movie": 0, "tv_show": 0,
+        "movie": 0, "tv_show": 0, "anime": 0,
         "fallback": 0,        # 靠配置的媒体类型兜底的文件数（文件名缺年份/季集）
-        "size": {"movie": 0, "tv_show": 0},
+        "size": {"movie": 0, "tv_show": 0, "anime": 0},
         "unreadable": 0,      # 文件存在但读不到大小（断链软链接 / 挂载失效 / 权限不足）
         "empty": 0,           # 0 字节的空文件
     }
     try:
         for cfg in load_config():
             suffixes = suffix_set(cfg.get("file_suffixes"))
-            config_type = cfg.get("file_type", "movie")
-            if config_type not in ("movie", "tv_show"):
-                config_type = "movie"
+            config_type = cfg.get("file_type", MEDIA_TYPE_MOVIE)
+            if config_type not in MEDIA_TYPES:
+                config_type = MEDIA_TYPE_MOVIE
 
             for mapping in cfg.get("paths", []):
                 target = mapping.get("target")
@@ -547,12 +550,12 @@ def media_stats():
                         if not any(file.lower().endswith(s) for s in suffixes):
                             continue
                         try:
-                            info = parse_filename(file)
+                            info = parse_filename(file, config_type)
                         except Exception:
                             info = {}
 
                         media_type = info.get("type", "unknown")
-                        if media_type in ("movie", "tv_show"):
+                        if media_type in MEDIA_TYPES:
                             if media_type != config_type:
                                 # 文件名判断出的类型优先（与执行逻辑一致）
                                 logger.debug(f"{file}：文件名判断为 {media_type}，配置为 {config_type}")

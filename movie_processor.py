@@ -48,6 +48,19 @@ LINK_MODE_LABELS = {
     LINK_MODE_SYMLINK: "软链接",
 }
 
+# 媒体类型
+MEDIA_TYPE_MOVIE = "movie"
+MEDIA_TYPE_TV = "tv_show"
+MEDIA_TYPE_ANIME = "anime"
+MEDIA_TYPES = (MEDIA_TYPE_MOVIE, MEDIA_TYPE_TV, MEDIA_TYPE_ANIME)
+# 动画在 TMDB 走剧集接口，NFO / 图片 / 重命名都按剧集处理
+TV_LIKE_TYPES = (MEDIA_TYPE_TV, MEDIA_TYPE_ANIME)
+MEDIA_TYPE_LABELS = {
+    MEDIA_TYPE_MOVIE: "电影",
+    MEDIA_TYPE_TV: "电视剧",
+    MEDIA_TYPE_ANIME: "动画",
+}
+
 # 单文件处理结果状态
 STATUS_SUCCESS = "success"
 STATUS_SKIPPED = "skipped"
@@ -547,15 +560,17 @@ def build_rename_placeholders(metadata, file_info, config_media_type, ext):
     title = metadata.get("title") or file_info.get("title") or "Unknown"
     year = (metadata.get("release_date") or file_info.get("year") or "")[:4] or "Unknown"
     season = str(file_info.get("season") or "00")
-    episode = str(file_info.get("episode") or "00")
+    episode_raw = file_info.get("episode")
+    episode = str(episode_raw or "00")
     episode_title = (metadata.get("episode_title") or "").replace(" ", "_")[:50]
 
     media_type = metadata.get("media_type") or file_info.get("type")
-    if not media_type and config_media_type == "tv_show":
-        media_type = "tv_show"
+    if not media_type:
+        media_type = config_media_type
 
+    # 动画按剧集处理；没有集号时 season_episode 留空，避免生成 S00E00
     season_episode = ""
-    if media_type == "tv_show":
+    if media_type in TV_LIKE_TYPES and episode_raw:
         season_episode = f"S{season}E{episode}"
 
     return {
@@ -576,7 +591,7 @@ def _apply_rename(dest_path, dest_dir, config, placeholders, index, config_name)
 
     ext = placeholders.get("ext") or os.path.splitext(dest_path)[1]
     default_rule = (
-        "{title}.{year}" if config.get("file_type", "movie") == "movie"
+        "{title}.{year}" if config.get("file_type", MEDIA_TYPE_MOVIE) == MEDIA_TYPE_MOVIE
         else "{title}.{season_episode}"
     )
     rule = (config.get("rename_rule") or default_rule).strip() or default_rule
@@ -661,14 +676,16 @@ def process_single_file(file_path, config, rel_dir, target_dir,
 
         scrape = bool(config.get("scrape_metadata", True))
         do_rename = bool(config.get("rename_file", True))
-        config_media_type = config.get("file_type", "movie")
+        config_media_type = config.get("file_type", MEDIA_TYPE_MOVIE)
+        if config_media_type not in MEDIA_TYPES:
+            config_media_type = MEDIA_TYPE_MOVIE
 
         # 既不刮削也不重命名：只建链接
         if not scrape and not do_rename:
             record_processed(file_path, dest_dir, processed_set)
             return FileOutcome(STATUS_SUCCESS, "仅建立链接", link.action)
 
-        file_info = parse_filename(filename)
+        file_info = parse_filename(filename, config_media_type)
         if not file_info:
             raise ValueError(f"无法解析文件名：{filename}")
 
@@ -679,7 +696,7 @@ def process_single_file(file_path, config, rel_dir, target_dir,
         metadata = {}
         if scrape:
             stage = "scrape"
-            if media_type == "tv_show":
+            if media_type in TV_LIKE_TYPES:
                 metadata = fetch_metadata_cached(
                     file_info["title"], None,
                     config.get("tmdb_api_key", ""), media_type="tv_show",
@@ -701,7 +718,7 @@ def process_single_file(file_path, config, rel_dir, target_dir,
         )
 
         episode_info = {}
-        if scrape and metadata.get("media_type") == "tv_show":
+        if scrape and metadata.get("media_type") == "tv_show" and file_info.get("episode"):
             episode_info = fetch_episode_metadata(
                 metadata.get("tmdbid"),
                 file_info.get("season") or metadata.get("season") or "1",

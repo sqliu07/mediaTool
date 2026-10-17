@@ -23,6 +23,8 @@
   --warn: #d97706;
   --tv: #0ea5a4;
   --tv-soft: #e6fbfa;
+  --anime: #a855f7;
+  --anime-soft: #f6ecfe;
 
   --radius-lg: 18px;
   --radius: 14px;
@@ -221,6 +223,7 @@ code {
 }
 .stat-icon.is-movie { background: var(--primary-soft); color: var(--primary-dark); }
 .stat-icon.is-tv { background: var(--tv-soft); color: var(--tv); }
+.stat-icon.is-anime { background: var(--anime-soft); color: var(--anime); }
 .stat-icon.is-unknown { background: #f5f6f9; color: var(--muted); }
 .stat-icon.is-total { background: #fff5e6; color: var(--warn); }
 
@@ -242,6 +245,7 @@ code {
 .distribution-bar .seg { display: block; height: 100%; transition: width .35s ease; }
 .seg-movie { background: linear-gradient(90deg, #7c93ff, var(--primary)); }
 .seg-tv { background: linear-gradient(90deg, #46d3cf, var(--tv)); }
+.seg-anime { background: linear-gradient(90deg, #c084fc, var(--anime)); }
 .seg-unknown { background: #c3ccdc; }
 
 .distribution-legend {
@@ -255,6 +259,7 @@ code {
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot-movie { background: var(--primary); }
 .dot-tv { background: var(--tv); }
+.dot-anime { background: var(--anime); }
 .dot-unknown { background: #c3ccdc; }
 
 /* ---------- 配置卡片 ---------- */
@@ -299,6 +304,7 @@ code {
 }
 .badge-soft.is-movie { background: var(--primary-soft); color: var(--primary-dark); border-color: #e2e9ff; }
 .badge-soft.is-tv { background: var(--tv-soft); color: #0b8583; border-color: #d5f5f2; }
+.badge-soft.is-anime { background: var(--anime-soft); color: #7e22ce; border-color: #f0ddfb; }
 .badge-soft.is-danger { background: var(--bad-soft); color: var(--bad); border-color: #f9dcdc; }
 
 .config-paths { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }

@@ -69,21 +69,27 @@
         if (data.error) { throw new Error(data.error); }
         var movie = data.movie || 0;
         var tv = data.tv_show || 0;
-        var total = movie + tv;
+        var anime = data.anime || 0;
+        var total = movie + tv + anime;
         var size = data.size || {};
 
         setText('#stat-movie', movie);
         setText('#stat-tv', tv);
+        setText('#stat-anime', anime);
         setText('#stat-total', total);
         setText('#stat-movie-size', formatSize(size.movie));
         setText('#stat-tv-size', formatSize(size.tv_show));
-        setText('#stat-total-size', formatSize((size.movie || 0) + (size.tv_show || 0)));
+        setText('#stat-anime-size', formatSize(size.anime));
+        setText('#stat-total-size', formatSize(
+          (size.movie || 0) + (size.tv_show || 0) + (size.anime || 0)
+        ));
 
         var pct = function (n) { return total > 0 ? (n / total * 100).toFixed(2) + '%' : '0%'; };
         var bar = $('#distribution-bar');
-        if (bar) {
+        if (bar && bar.children.length >= 3) {
           bar.children[0].style.width = pct(movie);
           bar.children[1].style.width = pct(tv);
+          bar.children[2].style.width = pct(anime);
         }
 
         // 把“按配置兜底 / 空文件 / 读不到大小”说清楚，避免误以为是统计错误

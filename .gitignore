@@ -9,3 +9,11 @@ venv/
 # 本地测试用的媒体目录（不要提交）
 testdata/
 hardlinktest/
+
+# 本地临时目录（测试用）
+.t/
+.t_up/
+.tmp_test/
+.regress/
+.smoke/
+.verify/

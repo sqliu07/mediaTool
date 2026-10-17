@@ -13,6 +13,7 @@ MediaTool 是一个基于 Flask + 原生 JavaScript 的本地媒体文件管理�
 
 - 📂 多源路径配置，按原有相对目录结构映射到统一目标路径
 - 🧠 自动识别媒体文件并匹配 TMDB 信息（中文元数据）
+- 🌸 支持动画（番剧）：识别 `[组] 作品 - 01`、`第01话`、`EP01` 等番剧命名
 - ✂️ 自定义重命名规则（`{title}.{year}`、`{title}.{season_episode}` 等）
 - 🔗 三种整理方式：**硬链接（推荐）/ 复制 / 软链接**，源文件不被破坏
 - 🔐 权限策略：目录 `2775`（setgid）+ 文件 `664`，可按需改为 777，支持一键批量修正历史文件
@@ -137,6 +138,31 @@ docker run -d --name mediatool -p 5001:5001 \
 
 ---
 
+## 🌸 动画（番剧）支持
+
+把配置里的「媒体类型」选成 **动画（番剧）** 后：
+
+- 元数据走 TMDB 的**剧集**接口（TMDB 没有独立的"动画"类型）
+- 文件名按番剧习惯识别集号：
+
+| 文件名写法 | 识别结果 |
+|---|---|
+| `[Lilith-Raws] One Piece - 1080 [1080p].mp4` | One Piece，第 1080 集 |
+| `[Nekomoe kissaten][Sousou no Frieren][01][1080p][CHS].mp4` | Sousou no Frieren，第 01 集 |
+| `[Group] Bocchi the Rock - 03v2 [1080p].mkv` | Bocchi the Rock，第 03 集 |
+| `Spy x Family 第05话.mkv` | Spy x Family，第 05 集 |
+| `Chainsaw Man EP08.mkv` | Chainsaw Man，第 08 集 |
+| `Jujutsu Kaisen S02E03.mkv` | Jujutsu Kaisen，S02E03 |
+
+- 默认重命名规则 `{title}.{season_episode}` → `Sousou no Frieren.S01E01.mkv`（季号默认 01，Jellyfin 可直接识别）
+- 识别不到集号时（剧场版、OVA 合集等）不会生成 `S00E00`，直接命名为 `标题.mkv`
+- 统计里单独一栏「动画」，不再混进电影/电视剧
+
+> 这套解析**只在「媒体类型 = 动画」的配置里启用**，电影 / 电视剧配置完全不受影响。
+> `Movie - 2019` 这类像年份的数字不会被误当成集号。
+
+---
+
 ## 🔐 权限设置（让刮削软件可写）
 
 > 界面里不需要理解八进制：权限用三个中文选项表达——**只有运行本工具的账号能改**（755/644）、**我和同一个「组」里的程序都能改（推荐）**（2775/664）、**任何账号都能改**（777/666）。八进制数字只在「自定义（高级）」里出现，选择非预设组合时会自动填入。下面是每个选项背后的原理。
@@ -224,7 +250,7 @@ Windows 不认识 Linux 权限，真正在 NAS 上落盘的是 **Samba 服务端
 | 字段 | 说明 |
 |---|---|
 | `paths` | 源目录 → 目标目录映射，可多组；保留源目录下的相对层级 |
-| `file_type` | `movie` 或 `tv_show`，影响默认重命名规则与元数据接口 |
+| `file_type` | `movie` / `tv_show` / `anime`，影响默认重命名规则与元数据接口（动画走 TMDB 剧集接口） |
 | `file_suffixes` | 参与处理的扩展名，如 `.mp4,.mkv`（不区分大小写） |
 | `link_mode` | `hardlink` / `copy` / `symlink`，默认硬链接 |
 | `rename_rule` | 占位符：`{title}` `{year}` `{season}` `{episode}` `{season_episode}` `{episode_title}` `{ext}` |

@@ -55,6 +55,14 @@
           <p class="stat-sub" id="stat-tv-size">0 B</p>
         </div>
       </article>
+      <article class="stat-card" title="按动画/番剧处理的文件：目录配置为「动画」，按番剧习惯识别集号（- 01、第01话、EP01、[01] 等）">
+        <div class="stat-icon is-anime">🌸</div>
+        <div class="stat-body">
+          <p class="stat-label">动画</p>
+          <p class="stat-value" id="stat-anime">0</p>
+          <p class="stat-sub" id="stat-anime-size">0 B</p>
+        </div>
+      </article>
       <article class="stat-card is-total">
         <div class="stat-icon is-total">Σ</div>
         <div class="stat-body">
@@ -69,10 +77,12 @@
       <div class="distribution-bar" id="distribution-bar">
         <span class="seg seg-movie" style="width:0%"></span>
         <span class="seg seg-tv" style="width:0%"></span>
+        <span class="seg seg-anime" style="width:0%"></span>
       </div>
       <div class="distribution-legend" id="distribution-legend">
         <span><i class="dot dot-movie"></i>电影</span>
         <span><i class="dot dot-tv"></i>电视剧</span>
+        <span><i class="dot dot-anime"></i>动画</span>
       </div>
     </div>
   </section>
@@ -99,6 +109,8 @@
             <h3>{{ cfg.name }}</h3>
             {% if cfg.file_type == 'tv_show' %}
             <span class="badge-soft is-tv">电视剧</span>
+            {% elif cfg.file_type == 'anime' %}
+            <span class="badge-soft is-anime">动画</span>
             {% else %}
             <span class="badge-soft is-movie">电影</span>
             {% endif %}
@@ -184,6 +196,7 @@
           <select id="cfg-file-type" class="form-control">
             <option value="movie">电影</option>
             <option value="tv_show">电视剧</option>
+            <option value="anime">动画（番剧）</option>
           </select>
         </div>
         <div class="field">
@@ -221,7 +234,7 @@
       <div class="field">
         <label for="cfg-rename">重命名规则</label>
         <input id="cfg-rename" class="form-control" placeholder="{title}.{year}">
-        <p class="hint">占位符：{title} {year} {season} {episode} {season_episode} {episode_title} {ext}；留空使用默认规则</p>
+        <p class="hint">占位符：{title} {year} {season} {episode} {season_episode} {episode_title} {ext}；留空使用默认规则（电影 <code>{title}.{year}</code>，剧集/动画 <code>{title}.{season_episode}</code>，动画默认第 1 季）</p>
       </div>
 
       <div class="field-row">
