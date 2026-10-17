@@ -26,6 +26,10 @@ PROCESSED_FILE = os.path.join(CONFIG_DIR, "processed.txt")
 _MAX_NAME_LENGTH = 150
 _INVALID_NAME_CHARS = re.compile(r'[\\/\x00-\x1f]')
 
+# 按「大小 + 修改时间」兜底去重时，只对大于该体积的文件生效：
+# 小文件出现同大小同时间的概率偏高，容易误判，宁可让它重复一次。
+CONTENT_DEDUPE_MIN_SIZE = 1024 * 1024
+
 # 未填写文件后缀时使用的默认值（覆盖常见视频容器）
 DEFAULT_FILE_SUFFIXES = (
     ".mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.m2ts,.rmvb,.rm,.mpg,.mpeg"
@@ -185,6 +189,7 @@ class TargetDirIndex:
         self._lock = threading.Lock()
         self._names = {}       # dir -> set(filename)
         self._inodes = {}      # dir -> {(st_dev, st_ino): path}
+        self._deep = {}        # target_root -> (inodes, signatures) 全树索引
         self._permission_done = set()  # 已经修过权限的目录
 
     # -- 索引维护 ---------------------------------------------------------
@@ -274,6 +279,85 @@ class TargetDirIndex:
         _, inodes = self.scan(dir_path)
         with self._lock:
             return inodes.get(inode_key)
+
+    # -- 全树索引：应对「文件被外部工具移进子目录」和「inode 已变化」 -------------
+    def deep_scan(self, root):
+        """扫描整个目标根目录树，返回 (inode -> 路径, (大小, mtime_ns) -> 路径)。
+
+        只在目标目录内没找到同一文件时才触发，且每个根目录只扫一次。
+        """
+        root = os.path.abspath(root)
+        with self._lock:
+            if root in self._deep:
+                return self._deep[root]
+
+        inodes, signatures = {}, {}
+        if os.path.isdir(root):
+            for current, _dirs, files in os.walk(root):
+                for name in files:
+                    path = os.path.join(current, name)
+                    try:
+                        st = os.stat(path, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    inodes.setdefault((st.st_dev, st.st_ino), path)
+                    signatures.setdefault((st.st_size, st.st_mtime_ns), path)
+            logger.debug(f"已建立目标目录树索引：{root}（{len(inodes)} 个文件）")
+
+        with self._lock:
+            self._deep.setdefault(root, (inodes, signatures))
+            return self._deep[root]
+
+    def find_duplicate(self, src_path, dest_dir, target_root=None):
+        """判断目标媒体库里是否已经有这个源文件。
+
+        依次尝试：
+          1. 目标目录内同 inode（正常的硬链接）
+          2. 整个目标根树内同 inode（文件被挪进子目录 / 重命名过）
+          3. 整个目标根树内大小 + 修改时间一致（复制后再删除，原 inode 已不在）
+
+        返回 (已有文件路径, 判定方式) 或 (None, None)。
+        """
+        try:
+            st = os.stat(src_path)
+        except OSError:
+            return None, None
+
+        inode_key = (st.st_dev, st.st_ino)
+        found = self.find_by_inode(dest_dir, inode_key)
+        if found:
+            return found, "inode"
+
+        root = target_root or dest_dir
+        same_root = os.path.realpath(root) == os.path.realpath(dest_dir)
+        if not same_root:
+            inodes, signatures = self.deep_scan(root)
+            with self._lock:
+                found = inodes.get(inode_key)
+            if found:
+                return found, "inode-moved"
+        else:
+            _, signatures = self.deep_scan(root)
+
+        # 最后兜底：大小与修改时间一致（外部工具 copy+delete 重命名后 inode 已变）。
+        # 只对较大的文件生效，并且抽样比对内容，避免误判成同一个。
+        if st.st_size >= CONTENT_DEDUPE_MIN_SIZE:
+            with self._lock:
+                candidate = signatures.get((st.st_size, st.st_mtime_ns))
+            if candidate and _same_content(src_path, candidate):
+                return candidate, "content"
+        return None, None
+
+    def remember(self, path):
+        """文件创建/改名后补进全树索引（若该根目录已经扫过）。"""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        with self._lock:
+            for _root, (inodes, signatures) in self._deep.items():
+                inodes.setdefault((st.st_dev, st.st_ino), path)
+                signatures.setdefault((st.st_size, st.st_mtime_ns), path)
 
     # -- 权限 -------------------------------------------------------------
     def mark_permission_fixed(self, dir_path):
@@ -443,20 +527,44 @@ def _fix_permissions(dest_path, dest_dir, index, policy=None):
                                policy or PermissionPolicy())
 
 
-def _has_link_in(src_path, dest_dir, index):
-    """目标目录里是否已存在与源文件同 inode 的硬链接。"""
+def _same_content(path_a, path_b, chunk=1024 * 1024):
+    """抽样比对两个文件内容：开头 / 中间 / 结尾各取 1MB。
+
+    只用于「大小与修改时间都一致」的候选，做最后一道确认，
+    避免把两个恰好同大小同时间的无关文件当成同一个。
+    """
     try:
-        st = os.stat(src_path)
-    except OSError:
+        size = os.path.getsize(path_a)
+        if size != os.path.getsize(path_b):
+            return False
+        offsets = {0, max(0, size // 2 - chunk // 2), max(0, size - chunk)}
+        with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
+            for offset in sorted(offsets):
+                fa.seek(offset)
+                fb.seek(offset)
+                if fa.read(chunk) != fb.read(chunk):
+                    return False
+        return True
+    except OSError as e:
+        logger.debug(f"比对文件内容时跳过（候选文件可能已被改名/删除）：{e}")
         return False
-    if not os.path.isdir(dest_dir):
+
+
+def _has_link_in(src_path, dest_dir, index, target_root=None):
+    """目标媒体库里是否已经有这个源文件（同 inode，或内容相同）。"""
+    if not os.path.isdir(dest_dir) and not os.path.isdir(target_root or ""):
         return False
-    return index.find_by_inode(dest_dir, (st.st_dev, st.st_ino)) is not None
+    existing, _reason = index.find_duplicate(src_path, dest_dir, target_root)
+    return existing is not None
 
 
 def create_link(src_path, dest_dir, config_name="", index=None,
-                mode=LINK_MODE_HARDLINK, policy=None):
-    """把 src_path 链接（或复制）到 dest_dir，返回 LinkResult。"""
+                mode=LINK_MODE_HARDLINK, policy=None, target_root=None):
+    """把 src_path 链接（或复制）到 dest_dir，返回 LinkResult。
+
+    target_root 是配置里的目标媒体库根目录：目标文件夹内没找到同一文件时，
+    会到整棵目标树里再找一次（应对文件被外部工具移进子目录或重新命名）。
+    """
     index = index if index is not None else TargetDirIndex()
     policy = policy or PermissionPolicy()
     mode = normalize_link_mode(mode)
@@ -479,17 +587,17 @@ def create_link(src_path, dest_dir, config_name="", index=None,
     if os.path.dirname(src_real) == os.path.realpath(dest_dir):
         return LinkResult(STATUS_SKIPPED, src_path, "源文件已位于目标目录，跳过")
 
-    # 硬链接：用 inode 精确判重（同一文件重复处理时不会产生副本）
-    if mode == LINK_MODE_HARDLINK:
-        existing = index.find_by_inode(
-            dest_dir, (src_stat.st_dev, src_stat.st_ino)
-        )
-        if existing:
-            return LinkResult(
-                STATUS_SKIPPED, existing,
-                f"目标目录已存在同一文件的硬链接：{os.path.basename(existing)}",
-                duplicate=True,
-            )
+    # 去重：目标目录内同 inode -> 整棵目标树同 inode -> 大小/时间一致
+    existing, reason = index.find_duplicate(src_path, dest_dir, target_root)
+    if existing:
+        reason_label = {
+            "inode": "目标目录内已存在同一文件的硬链接",
+            "inode-moved": "目标媒体库中已存在同一文件（被移动或重命名过）",
+            "content": "目标媒体库中已存在内容相同的文件（大小与修改时间一致）",
+        }.get(reason, "目标媒体库中已存在该文件")
+        message = f"{reason_label}：{existing}"
+        logger.info(f"[配置:{config_name}] {message}，跳过")
+        return LinkResult(STATUS_SKIPPED, existing, message, duplicate=True)
 
     filename = os.path.basename(src_path)
     try:
@@ -532,6 +640,7 @@ def create_link(src_path, dest_dir, config_name="", index=None,
         return LinkResult(STATUS_FAILED, None, message)
 
     index.commit(dest_dir, dest_path)
+    index.remember(dest_path)
     _apply_created_permissions(dest_path, dest_dir, created_dirs, index, policy)
     logger.info(f"[配置:{config_name}] 已建立{label}：{dest_path}")
     return LinkResult(action, dest_path, "")
@@ -651,7 +760,9 @@ def process_single_file(file_path, config, rel_dir, target_dir,
         if is_processed(processed_set, file_path, dest_dir):
             # 记录说处理过，但目标目录里的链接可能已被手动删除/改名：
             # 硬链接模式下用 inode 复核一次，目标真的不在了就重新处理。
-            if mode == LINK_MODE_HARDLINK and not _has_link_in(file_path, dest_dir, index):
+            if mode == LINK_MODE_HARDLINK and not _has_link_in(
+                file_path, dest_dir, index, target_dir
+            ):
                 logger.info(
                     f"[配置:{config_name}] 处理记录存在但目标链接已丢失，重新处理：{file_path}"
                 )
@@ -664,6 +775,7 @@ def process_single_file(file_path, config, rel_dir, target_dir,
             index=index,
             mode=mode,
             policy=policy,
+            target_root=target_dir,
         )
         if not link.ok:
             return FileOutcome(STATUS_FAILED, link.message)
