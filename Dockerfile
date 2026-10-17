@@ -25,9 +25,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 # 再复制源码（.dockerignore 已排除 .venv / testdata / configs / logs 等）
 COPY . .
 
-# 运行期目录与入口脚本
+# 运行期目录与入口脚本（entrypoint.sh 由 COPY . . 落在 /app 下）
 RUN mkdir -p /app/configs /app/logs \
-    && chmod 755 /entrypoint.sh
+    && chmod 755 /app/entrypoint.sh
 
 EXPOSE 5001
 
@@ -35,7 +35,7 @@ EXPOSE 5001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5001/progress', timeout=3).status == 200 else 1)"]
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 
 # 进度状态保存在进程内存中，定时任务也应只跑一份，
 # 因此固定为「单 worker + 多线程」；--timeout 0 避免长任务被 kill。
