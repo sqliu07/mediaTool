@@ -122,10 +122,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 下载全部构建产物
+      - name: 下载镜像产物（只取 image-*，避开 buildx 的缓存 artifact）
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: image-*
           merge-multiple: true
 
       - name: 计算版本号
