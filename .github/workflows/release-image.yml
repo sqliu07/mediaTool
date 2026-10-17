@@ -1,0 +1,184 @@
+name: Build Image and Publish Release
+
+# 打 tag（v1.0.0 这种）时自动构建镜像、冒烟测试、导出 tar.gz 并挂到 Release；
+# 也可以在 Actions 页面手动触发并指定 tag。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布用 tag（例如 v1.0.0），会成为 Release 的 tag"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }} image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write          # 上传 workflow artifact
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 计算版本号
+        id: ver
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          RAW="${INPUT_TAG:-}"
+          if [ -z "$RAW" ]; then RAW="${REF_NAME:-}"; fi
+          if [ -z "$RAW" ]; then RAW="v0.0.0-build${RUN_NUMBER}"; fi
+          SAFE="$(printf '%s' "$RAW" | tr '/' '-' | tr -cd '[:alnum:]._-')"
+          echo "tag=$RAW"   >> "$GITHUB_OUTPUT"
+          echo "safe=$SAFE" >> "$GITHUB_OUTPUT"
+          echo "版本号：$RAW（镜像/文件名用 $SAFE）"
+
+      - name: 准备 QEMU（跨架构构建）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: mediatool:${{ steps.ver.outputs.safe }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.title=MediaTool
+            org.opencontainers.image.version=${{ steps.ver.outputs.safe }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: 镜像冒烟测试（仅 amd64，arm64 走 QEMU 太慢）
+        if: matrix.arch == 'amd64'
+        env:
+          IMAGE: mediatool:${{ steps.ver.outputs.safe }}
+        run: |
+          set -uo pipefail
+          docker run -d --name smoketest -p 5001:5001 "$IMAGE"
+          ok=0
+          for _ in $(seq 1 40); do
+            if curl -fsS -o /dev/null http://127.0.0.1:5001/progress; then ok=1; break; fi
+            sleep 1
+          done
+          echo "----- 容器日志（末尾 20 行）-----"
+          docker logs smoketest 2>&1 | tail -20 || true
+          docker rm -f smoketest >/dev/null 2>&1 || true
+          if [ "$ok" != "1" ]; then
+            echo "::error::镜像启动后 /progress 无响应"
+            exit 1
+          fi
+          echo "冒烟测试通过"
+
+      - name: 导出镜像压缩包
+        env:
+          SAFE: ${{ steps.ver.outputs.safe }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          FILE="mediatool-${SAFE}-linux-${ARCH}.tar.gz"
+          docker save "mediatool:${SAFE}" | gzip -9 > "$FILE"
+          sha256sum "$FILE" > "${FILE}.sha256"
+          ls -lh "$FILE" "${FILE}.sha256"
+          echo "ASSET=${FILE}" >> "$GITHUB_ENV"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 计算版本号
+        id: ver
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          RAW="${INPUT_TAG:-}"
+          if [ -z "$RAW" ]; then RAW="${REF_NAME:-}"; fi
+          if [ -z "$RAW" ]; then RAW="v0.0.0-build${RUN_NUMBER}"; fi
+          echo "tag=$RAW" >> "$GITHUB_OUTPUT"
+          echo "版本号：$RAW"
+
+      - name: 列出待发布文件
+        run: ls -lh dist
+
+      - name: 创建 / 更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: MediaTool ${{ steps.ver.outputs.tag }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          body: |
+            ## 镜像压缩包（离线导入）
+
+            | 架构 | 适用设备 |
+            |---|---|
+            | `amd64` | Intel / AMD 的 x86 NAS、迷你主机、普通服务器 |
+            | `arm64` | ARM NAS（如群晖部分机型）、树莓派、Apple Silicon |
+
+            ### 使用方式
+
+            ```bash
+            # 1. 校验并导入镜像（把文件名换成你下载的）
+            sha256sum -c mediatool-${{ steps.ver.outputs.tag }}-linux-amd64.tar.gz.sha256
+            gzip -dc mediatool-${{ steps.ver.outputs.tag }}-linux-amd64.tar.gz | docker load
+
+            # 2. 启动
+            docker run -d --name mediatool -p 5001:5001 \
+              -v /你的媒体路径:/media \
+              -v ./configs:/app/configs \
+              -v ./logs:/app/logs \
+              -e TZ=Asia/Shanghai \
+              -e SECRET_KEY=改成一串随机字符 \
+              -e PUID=$(id -u) -e PGID=$(id -g) \
+              mediatool:${{ steps.ver.outputs.tag }}
+            ```
+
+            > `configs` 目录一定要挂载出来，否则重建容器后处理记录（processed.txt）会丢失。
+            > 启动后访问 `http://localhost:5001/`。

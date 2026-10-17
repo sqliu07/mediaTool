@@ -1,0 +1,27 @@
+services:
+  mediatool:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mediatool:latest
+    container_name: mediatool
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    environment:
+      TZ: Asia/Shanghai
+      # 请改成你自己的随机字符串
+      SECRET_KEY: change-me-please
+      # 容器进程身份：设成媒体库的属主用户 / 共享组，写出的文件才能被刮削软件改写
+      PUID: "1000"
+      PGID: "2000"
+    volumes:
+      # 媒体库：容器内路径请保持 /media，改动会让处理记录里的路径失配
+      - /mnt/data/media:/media
+      # 必须：配置 + 处理记录（processed.txt），重建容器后仍能增量跳过
+      - ./configs:/app/configs
+      # 可选：日志
+      - ./logs:/app/logs
+      # 源码热更新（调试用，不需要时注释掉）
+      # - ./static:/app/static
+      # - ./templates:/app/templates

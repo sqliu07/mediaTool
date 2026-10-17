@@ -2,143 +2,420 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>MediaTool</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediaTool · 本地媒体刮削</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
   <link rel="icon" href="{{ url_for('static', filename='images/favicon.ico') }}" type="image/x-icon">
-  <style>
-    #editor-panel { position: fixed; top: 0; right: -450px; width: 450px; height: 100%; background: #fff;
-      border-left: 1px solid #ccc; padding: 20px; transition: right .3s; overflow-y: auto; z-index:1000;
-    }
-    #editor-panel.open { right: 0; }
-  </style>
 </head>
 <body>
-<div class="container mt-4">
-  <div class="text-center"></div>
-  <h2 style="text-align: center;">MediaTool</h2>
-  <button id="btn-run" class="btn btn-success mb-3">执行全部任务</button>
-  <hr>
-  <div class="d-flex justify-content-between align-items-center">
-    <h4>任务配置列表</h4>
-    <button id="btn-new" class="btn btn-primary btn-sm">➕ 新建配置</button>
-  </div>
-<div class="row" id="config-list">
-  {% for cfg in configs %}
-  <div class="col-md-6 mb-3">
-    <div class="card h-100">
-      <div class="card-body">
-        <h5 class="card-title">{{ cfg.name }}</h5>
-        <h6 class="card-subtitle mb-2 text-muted">
-          类型：{{ cfg.file_type | default('未知') | upper }}
-        </h6>
-        <div class="mt-3">
-          <button class="btn btn-sm btn-outline-primary mr-2" onclick="runSingleConfig('{{ cfg.name }}')">执行</button>
-          <button class="btn btn-sm btn-outline-secondary mr-2" onclick="editConfig('{{ cfg.name }}')">编辑</button>
-          <button class="btn btn-sm btn-outline-danger mr-2" onclick="deleteConfig('{{ cfg.name }}')">删除</button>
-        </div>
+
+<header class="app-header">
+  <div class="app-header-inner">
+    <div class="brand">
+      <div class="brand-mark">🎬</div>
+      <div class="brand-text">
+        <h1>MediaTool</h1>
+        <p>本地媒体刮削 · 硬链接整理 · Jellyfin 元数据</p>
       </div>
     </div>
+    <div class="header-actions">
+      <button class="btn btn-ghost" data-action="refresh-stats">刷新统计</button>
+      <button class="btn btn-primary" data-action="run-all">执行全部任务</button>
+    </div>
   </div>
-  {% endfor %}
-</div>
-</div>
+</header>
 
-<hr>
-<h4 class="text-center mt-4">📊 媒体库统计</h4>
-<div class="d-flex justify-content-center">
-  <canvas id="media-chart" style="max-width: 300px; max-height: 300px;"></canvas>
-</div>
-<div class="text-center">
-  <button class="btn btn-sm btn-outline-info mt-2" onclick="loadStats()">重新加载统计</button>
-</div>
+<main class="app-main">
 
-<!-- 侧边编辑面板 -->
-<div id="editor-panel">
-  <h5>配置编辑</h5>
-  <form id="cfg-form" onsubmit="saveConfig(event)">
-    <div class="form-group">
-      <label>配置名称</label>
-      <input type="text" id="cfg-name" class="form-control" required>
+  <!-- 媒体库概览 -->
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <h2>媒体库概览</h2>
+        <p class="section-desc">统计各配置目标目录中的媒体文件</p>
+      </div>
+      <span class="section-meta" id="stats-meta">正在统计…</span>
     </div>
-    <div class="form-group">
-      <label>文件类型</label>
-      <select id="cfg-file-type" class="form-control">
-        <option value="movie">电影</option>
-        <option value="tv_show">电视剧</option>
-      </select>
+
+    <div class="stats-grid">
+      <article class="stat-card" title="按电影处理的文件：文件名带年份，或文件名判断不出类型时按配置的「媒体类型 = 电影」处理">
+        <div class="stat-icon is-movie">🎞</div>
+        <div class="stat-body">
+          <p class="stat-label">电影</p>
+          <p class="stat-value" id="stat-movie">0</p>
+          <p class="stat-sub" id="stat-movie-size">0 B</p>
+        </div>
+      </article>
+      <article class="stat-card" title="按剧集处理的文件：文件名带 S01E01 这类季集信息，或文件名判断不出类型时按配置的「媒体类型 = 电视剧」处理">
+        <div class="stat-icon is-tv">📺</div>
+        <div class="stat-body">
+          <p class="stat-label">电视剧</p>
+          <p class="stat-value" id="stat-tv">0</p>
+          <p class="stat-sub" id="stat-tv-size">0 B</p>
+        </div>
+      </article>
+      <article class="stat-card is-total">
+        <div class="stat-icon is-total">Σ</div>
+        <div class="stat-body">
+          <p class="stat-label">合计</p>
+          <p class="stat-value" id="stat-total">0</p>
+          <p class="stat-sub" id="stat-total-size">0 B</p>
+        </div>
+      </article>
     </div>
-    <div class="form-group">
-      <label>TMDB API Key</label>
-      <input type="text" id="cfg-tmdb-api-key" class="form-control" placeholder="请输入 TMDB API Key">
+
+    <div class="distribution">
+      <div class="distribution-bar" id="distribution-bar">
+        <span class="seg seg-movie" style="width:0%"></span>
+        <span class="seg seg-tv" style="width:0%"></span>
+      </div>
+      <div class="distribution-legend" id="distribution-legend">
+        <span><i class="dot dot-movie"></i>电影</span>
+        <span><i class="dot dot-tv"></i>电视剧</span>
+      </div>
     </div>
-    <div id="path-mappings"></div>
-    <button type="button" class="btn btn-sm btn-outline-primary mb-2" onclick="addPath()">➕ 添加路径映射</button>
-    <div class="form-check mt-2">
-      <input class="form-check-input" type="checkbox" id="cfg-enable-scrape" checked>
-      <label class="form-check-label" for="enable-scrape">
-        抓取元数据（TMDB）
-      </label>
+  </section>
+
+  <!-- 任务配置 -->
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <h2>任务配置</h2>
+        <p class="section-desc">每组配置是一套「源目录 → 目标目录」的整理规则</p>
+      </div>
+      <div class="section-actions">
+        <span class="section-meta" id="processed-meta" title="处理记录所在文件">已记录 —</span>
+        <button class="btn btn-ghost" data-action="clear-processed" title="删除 configs/processed.txt，下次执行会重新扫描全部文件">清空处理记录</button>
+        <button class="btn btn-primary" data-action="new">＋ 新建配置</button>
+      </div>
     </div>
-    <div class="form-check">
-      <input type="checkbox" class="form-check-input" id="cfg-enable-rename" checked>
-      <label class="form-check-label" for="cfg-enable-rename">
-        执行文件重命名
-        <span id="rename-hint" class="text-muted small d-block mt-1">
-          ⚠️ 仅在启用元数据抓取后可重命名
-        </span>
-      </label>
+
+    <div class="config-grid" id="config-list">
+      {% for cfg in configs %}
+      <article class="config-card{% if cfg.enabled is defined and not cfg.enabled %} is-disabled{% endif %}" data-name="{{ cfg.name }}">
+        <header class="config-head">
+          <div class="config-title">
+            <h3>{{ cfg.name }}</h3>
+            {% if cfg.file_type == 'tv_show' %}
+            <span class="badge-soft is-tv">电视剧</span>
+            {% else %}
+            <span class="badge-soft is-movie">电影</span>
+            {% endif %}
+          </div>
+          <label class="switch" title="启用 / 停用">
+            <input type="checkbox" class="config-toggle" data-name="{{ cfg.name }}"
+                   {% if cfg.enabled is not defined or cfg.enabled %}checked{% endif %}>
+            <span class="slider"></span>
+          </label>
+        </header>
+
+        <ul class="config-paths">
+          {% for p in cfg.paths[:2] %}
+          <li>
+            <span class="path-chip" title="{{ p.source }}">{{ p.source }}</span>
+            <span class="path-arrow">→</span>
+            <span class="path-chip is-target" title="{{ p.target }}">{{ p.target }}</span>
+          </li>
+          {% endfor %}
+          {% if cfg.paths|length > 2 %}
+          <li class="path-more">还有 {{ cfg.paths|length - 2 }} 组路径映射…</li>
+          {% endif %}
+        </ul>
+
+        <dl class="config-meta">
+          <div>
+            <dt>链接方式</dt>
+            <dd>{{ {'hardlink': '硬链接', 'copy': '复制', 'symlink': '软链接'}.get(cfg.link_mode | default('hardlink', true), '硬链接') }}</dd>
+          </div>
+          <div>
+            <dt>刮削</dt>
+            <dd class="{{ 'is-on' if cfg.scrape_metadata is not defined or cfg.scrape_metadata else 'is-off' }}">{{ '开启' if cfg.scrape_metadata is not defined or cfg.scrape_metadata else '关闭' }}</dd>
+          </div>
+          <div>
+            <dt>重命名</dt>
+            <dd class="{{ 'is-on' if cfg.rename_file is not defined or cfg.rename_file else 'is-off' }}">{{ '开启' if cfg.rename_file is not defined or cfg.rename_file else '关闭' }}</dd>
+          </div>
+          <div>
+            <dt>定时</dt>
+            <dd class="{{ 'is-on' if cfg.schedule_interval else 'is-off' }}">{{ (cfg.schedule_interval | int) ~ ' 分钟' if cfg.schedule_interval else '未启用' }}</dd>
+          </div>
+        </dl>
+
+        <footer class="config-foot">
+          <button class="btn btn-sm btn-primary-soft" data-action="run" data-name="{{ cfg.name }}">执行</button>
+          <button class="btn btn-sm btn-ghost" data-action="edit" data-name="{{ cfg.name }}">编辑</button>
+          <button class="btn btn-sm btn-danger-ghost" data-action="delete" data-name="{{ cfg.name }}">删除</button>
+        </footer>
+      </article>
+      {% else %}
+      <div class="empty-state">
+        <div class="empty-icon">📂</div>
+        <h3>还没有任何配置</h3>
+        <p>添加一组源目录 → 目标目录，即可开始扫描、链接并抓取 TMDB 元数据。</p>
+        <button class="btn btn-primary" data-action="new">＋ 新建配置</button>
+      </div>
+      {% endfor %}
     </div>
-    <div class="form-group">
-      <label>文件后缀（如 .mp4,.mkv）</label>
-      <input type="text" id="cfg-suffixes" class="form-control">
+  </section>
+</main>
+
+<!-- 编辑抽屉 -->
+<div class="drawer-backdrop" id="drawer-backdrop" data-action="close-editor"></div>
+<aside class="editor-drawer" id="editor-panel" aria-hidden="true">
+  <header class="drawer-head">
+    <div>
+      <h2 id="editor-title">新建配置</h2>
+      <p class="drawer-sub">修改后点击保存才会生效</p>
     </div>
-    <div class="form-group">
-      <label>重命名规则（如{title}.{year}）</label>
-      <input type="text" id="cfg-rename" class="form-control" placeholder="">
-      <small class="form-text text-muted">示例如下</small>
-      <small class="form-text text-muted">电影：{title}.{year}</small>
-      <small class="form-text text-muted">剧集：{title}.{year}.S{season}.E{episode}.{episode_title}</small>
+    <button class="icon-btn" data-action="close-editor" aria-label="关闭">✕</button>
+  </header>
+
+  <form id="cfg-form" class="drawer-form" autocomplete="off">
+    <div class="drawer-body">
+      <div class="field">
+        <label for="cfg-name">配置名称</label>
+        <input id="cfg-name" class="form-control" placeholder="例如：电影整理" required>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label for="cfg-file-type">媒体类型</label>
+          <select id="cfg-file-type" class="form-control">
+            <option value="movie">电影</option>
+            <option value="tv_show">电视剧</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cfg-link-mode">链接方式</label>
+          <select id="cfg-link-mode" class="form-control">
+            <option value="hardlink">硬链接（推荐）</option>
+            <option value="copy">复制</option>
+            <option value="symlink">软链接</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="cfg-tmdb-api-key">TMDB API Key</label>
+        <input id="cfg-tmdb-api-key" class="form-control" placeholder="抓取元数据时必填">
+        <p class="hint">在 themoviedb.org 免费申请，仅保存在本机 configs/config.json</p>
+      </div>
+
+      <div class="field">
+        <div class="field-head">
+          <label>路径映射</label>
+          <button type="button" class="btn btn-sm btn-ghost" data-action="add-path">＋ 添加</button>
+        </div>
+        <div id="path-mappings" class="path-list"></div>
+        <p class="hint">源目录保留原有相对目录结构，链接到目标目录</p>
+      </div>
+
+      <div class="field">
+        <label for="cfg-suffixes">文件后缀</label>
+        <input id="cfg-suffixes" class="form-control"
+               placeholder="留空使用默认：.mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.m2ts,.rmvb">
+        <p class="hint">留空即使用默认后缀；也可以只填 <code>.mkv</code> 这类你需要的一种或几种（逗号分隔）</p>
+      </div>
+
+      <div class="field">
+        <label for="cfg-rename">重命名规则</label>
+        <input id="cfg-rename" class="form-control" placeholder="{title}.{year}">
+        <p class="hint">占位符：{title} {year} {season} {episode} {season_episode} {episode_title} {ext}；留空使用默认规则</p>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label for="cfg-interval">定时扫描（分钟，0 = 关闭）</label>
+          <input id="cfg-interval" type="number" min="0" class="form-control" value="0">
+        </div>
+        <div class="field">
+          <label for="cfg-threads">并发线程</label>
+          <input id="cfg-threads" type="number" min="1" max="32" class="form-control" value="4">
+        </div>
+      </div>
+
+      <div class="switch-row">
+        <div>
+          <p class="switch-title">抓取元数据（TMDB）</p>
+          <p class="switch-desc">生成 .nfo 与海报、剧集缩略图</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="cfg-enable-scrape" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="switch-row">
+        <div>
+          <p class="switch-title">执行重命名</p>
+          <p class="switch-desc">按上面的规则重命名媒体文件</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="cfg-enable-rename" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="perm-block">
+        <div class="switch-row">
+          <div>
+            <p class="switch-title">自动修正新建文件权限</p>
+            <p class="switch-desc">只作用于本次新建的目录与文件，不做递归 chmod</p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="cfg-fix-permissions" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <fieldset class="perm-modes" id="perm-modes">
+          <legend class="perm-legend">谁能修改这些文件？</legend>
+
+          <label class="perm-option">
+            <input type="radio" name="perm-mode" value="private" data-dir="755" data-file="644">
+            <span class="perm-radio"></span>
+            <span class="perm-body">
+              <span class="perm-title">只有运行本工具的账号能改</span>
+              <span class="perm-desc">其他账号和软件只能读；仅当刮削软件也用这个账号（如 Samba 配了 force user）时才够用</span>
+            </span>
+            <code class="perm-code">755/644</code>
+          </label>
+
+          <label class="perm-option">
+            <input type="radio" name="perm-mode" value="group" data-dir="2775" data-file="664" checked>
+            <span class="perm-radio"></span>
+            <span class="perm-body">
+              <span class="perm-title">我和同一个「组」里的程序都能改<span class="perm-badge">推荐</span></span>
+              <span class="perm-desc">需要先在 NAS 上把刮削软件加入同一个组（相当于 Windows 的用户组）；不确定怎么加就选下一项</span>
+            </span>
+            <code class="perm-code">2775/664</code>
+          </label>
+
+          <label class="perm-option">
+            <input type="radio" name="perm-mode" value="open" data-dir="777" data-file="666">
+            <span class="perm-radio"></span>
+            <span class="perm-body">
+              <span class="perm-title">任何账号都能改<span class="perm-badge is-open">SMB 共享选这个</span></span>
+              <span class="perm-desc">Windows 通过 SMB（\\NAS\media）读写、或者不确定刮削软件用哪个账号时，选这个最省事</span>
+            </span>
+            <code class="perm-code">777/666</code>
+          </label>
+
+          <label class="perm-option">
+            <input type="radio" name="perm-mode" value="custom" data-dir="" data-file="">
+            <span class="perm-radio"></span>
+            <span class="perm-body">
+              <span class="perm-title">自定义（高级）</span>
+              <span class="perm-desc">已经知道八进制权限含义时再改</span>
+            </span>
+            <code class="perm-code">自定义</code>
+          </label>
+        </fieldset>
+
+        <div class="perm-custom" id="perm-custom" hidden>
+          <div class="field-row">
+            <div class="field">
+              <label for="cfg-dir-mode">目录权限（八进制）</label>
+              <input id="cfg-dir-mode" class="form-control" value="2775" placeholder="例如 2775">
+            </div>
+            <div class="field">
+              <label for="cfg-file-mode">文件权限（八进制）</label>
+              <input id="cfg-file-mode" class="form-control" value="664" placeholder="例如 664">
+            </div>
+          </div>
+          <p class="hint">四位数字中第一位是特殊位（2 = 继承上级目录的分组），后面依次是本人 / 同组 / 其他人的读(4)、写(2)、执行(1)。</p>
+        </div>
+
+        <p class="perm-warning" id="perm-warning" hidden>
+          选「只有运行本工具的账号能改」时，如果刮削软件用其他账号运行，它就无法在这个目录里生成海报和 .nfo。
+        </p>
+
+        <p class="perm-tip">
+          <strong>SMB / Windows 共享：</strong>Windows 上的刮削软件通过 <code>\\NAS\media</code> 访问时，
+          实际使用的 Linux 账号往往不由你控制（匿名共享通常是 <code>nobody</code>）。
+          这种情况直接选「任何账号都能改」最省事；或者在 Samba 共享里用
+          <code>force user</code> 把写入统一成固定账号，那时选「只有运行本工具的账号能改」就够了。
+        </p>
+
+        <p class="hint">
+          一般只需要在这里选一项：本工具会按你的选择给新建的目录和文件设置权限。
+          选带「组」的那项时，新建文件会自动归到上级目录所在的组，之后无需再手动 chmod。
+          注意：硬链接和源文件是同一份数据，改权限会同时影响源文件。
+        </p>
+
+        <button type="button" class="btn btn-sm btn-ghost" data-action="fix-permissions"
+                id="btn-fix-permissions">立即修正该配置已有目录的权限</button>
+      </div>
     </div>
-    <div class="form-group">
-      <label>定时扫描间隔（分钟，0=不启用）</label>
-      <input type="number" id="cfg-interval" class="form-control" value="0" min="0">
-    </div>
-    <button class="btn btn-success">保存</button>
-    <button type="button" class="btn btn-secondary ml-2" onclick="closeEditor()">取消</button>
+
+    <footer class="drawer-foot">
+      <button type="button" class="btn btn-ghost" data-action="close-editor">取消</button>
+      <button type="submit" class="btn btn-primary">保存配置</button>
+    </footer>
   </form>
-</div>
+</aside>
 
-<!-- 进度对话框 -->
-<div class="modal fade" id="progressModal" tabindex="-1">
-  <div class="modal-dialog modal-lg modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">任务进度</h5>
+<!-- 进度面板 -->
+<div class="overlay" id="progress-overlay" aria-hidden="true">
+  <section class="progress-panel" role="dialog" aria-modal="true" aria-labelledby="progress-title">
+    <header class="progress-head">
+      <div>
+        <h2 id="progress-title">任务进度</h2>
+        <p class="progress-stage" id="progress-stage">准备中…</p>
       </div>
-      <div class="modal-body">
-        <div class="progress mb-3"style="width:90%;height:24px;margin:auto;">
-          <div id="progress-bar" class="progress-bar" style="width:0%">0%</div>
-        </div>
-        <div id="progress-stats" class="mb-3">
-          <p id="progress-text" class="mb-2">0 / 0</p>
-          <p id="elapsed-time" class="mb-2 text-muted">耗时：00:00:00</p>
-          <p class="mb-2">成功：<span id="success-count" class="text-success">0</span></p>
-          <p class="mb-2">失败：<span id="failed-count" class="text-danger">0</span></p>
-        </div>
-        <div id="error-list" class="mt-3" style="display:none;">
-          <h6 class="text-danger">失败文件列表</h6>
-          <ul id="error-details" class="list-unstyled text-danger pl-3" style="font-size: 1rem;"></ul>
-        </div>
-        </div>
-        <div id="complete-message" class="alert mt-3" style="display:none;"></div>
+      <button class="icon-btn" data-action="close-progress" aria-label="关闭">✕</button>
+    </header>
+
+    <div class="progress-body">
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill"></div>
       </div>
+      <div class="progress-summary">
+        <span class="progress-percent" id="progress-percent">0%</span>
+        <span id="progress-count">0 / 0</span>
+        <span id="progress-elapsed">耗时 00:00:00</span>
+      </div>
+
+      <div class="progress-stats">
+        <div class="mini-stat">
+          <span class="mini-label">成功</span>
+          <span class="mini-value is-ok" id="count-success">0</span>
+        </div>
+        <div class="mini-stat">
+          <span class="mini-label">跳过</span>
+          <span class="mini-value" id="count-skipped">0</span>
+        </div>
+        <div class="mini-stat">
+          <span class="mini-label">失败</span>
+          <span class="mini-value is-bad" id="count-failed">0</span>
+        </div>
+        <div class="mini-stat">
+          <span class="mini-label">已链接</span>
+          <span class="mini-value" id="count-linked">0</span>
+        </div>
+      </div>
+
+      <div class="error-block" id="error-block" hidden>
+        <div class="error-head">
+          <h3>失败文件</h3>
+          <span class="badge-soft is-danger" id="error-count">0</span>
+        </div>
+        <div class="error-list" id="error-list"></div>
+      </div>
+
+      <div class="result-block" id="result-block" hidden></div>
     </div>
-  </div>
+
+    <footer class="progress-foot">
+      <span class="log-path">日志：<code id="log-path">—</code></span>
+      <button class="btn btn-ghost" data-action="close-progress">关闭</button>
+    </footer>
+  </section>
 </div>
 
-<script src="{{ url_for('static', filename='js/jquery-3.5.1.min.js') }}"></script>
-<script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+<div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
 <script src="{{ url_for('static', filename='js/script.js') }}"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>
 </html>

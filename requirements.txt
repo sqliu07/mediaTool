@@ -2,4 +2,6 @@ Flask==2.2.2
 requests==2.28.1
 APScheduler==3.10.4
 Werkzeug==2.2.2
-gunicorn==20.1.0
+# gunicorn 20.1.0 依赖 pkg_resources，Python 3.12 起会报 ModuleNotFoundError，
+# 这里使用 23.x（同样支持 Python 3.9）
+gunicorn==23.0.0

@@ -1,383 +1,685 @@
-// 打开/关闭编辑面板
-let chartInstance = null;
-function openEditor() { $('#editor-panel').addClass('open'); }
-function closeEditor(){ $('#editor-panel').removeClass('open'); }
+/* MediaTool 前端交互：配置管理、任务进度、媒体库统计（无框架依赖） */
+(function () {
+  'use strict';
 
-function loadStats() {
-  fetch('/stats')
-    .then(r => r.json())
-    .then(data => {
-      window.mediaSizeMap = data.size || {};
-      const ctx = document.getElementById('media-chart').getContext('2d');
-      const labels = ['电影', '电视剧', '未知'];
-      const values = [data.movie || 0, data.tv_show || 0, data.unknown || 0];
+  var $ = function (sel, root) { return (root || document).querySelector(sel); };
+  var $$ = function (sel, root) {
+    return Array.prototype.slice.call((root || document).querySelectorAll(sel));
+  };
 
-      if (chartInstance) chartInstance.destroy(); // 避免重复创建
-      chartInstance = new Chart(ctx, {
-        type: 'pie',
-        data: {
-          labels: labels,
-          datasets: [{
-            label: '媒体类型统计',
-            data: values,
-            borderWidth: 1
-          }]
-        },
-        options: {
-          responsive: true,
-          plugins: {
-            legend: { position: 'bottom' },
-            title: { display: true, text: '媒体类型分布' },
-            tooltip: {
-              callbacks: {
-                label: function(context) {
-                  const index = context.dataIndex;
-                  const count = context.dataset.data[index];
-                  const type = context.label; // "电影" / "电视剧" / "未知"
-                  const sizes = ['movie', 'tv_show', 'unknown'];
-                  const sizeKey = sizes[index];
-                  const sizeBytes = (window.mediaSizeMap && window.mediaSizeMap[sizeKey]) || 0;
-        
-                  return `${type}：${count} 个，${formatSize(sizeBytes)}`;
-                }
-              }
-            }
-          }
-        }
-      });
-    });
-}
+  var state = {
+    pollTimer: null,
+    running: false,
+    editingName: null,
+  };
 
-function formatSize(bytes) {
-  if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 ** 3)).toFixed(2) + ' GB';
-  if (bytes >= 1024 * 1024) return (bytes / (1024 ** 2)).toFixed(2) + ' MB';
-  if (bytes >= 1024) return (bytes / 1024).toFixed(2) + ' KB';
-  return bytes + ' B';
-}
-// 增加一行路径映射
-function addPath(src='', dst='') {
-  const idx = Date.now();
-  $('#path-mappings').append(`
-    <div class="form-row mb-2" data-idx="${idx}">
-      <div class="col"><input class="form-control" placeholder="源路径" value="${src}"></div>
-      <div class="col"><input class="form-control" placeholder="目标路径" value="${dst}"></div>
-      <div class="col-auto">
-        <button type="button" class="btn btn-danger btn-sm" onclick="$(this).closest('.form-row').remove()">✖</button>
-      </div>
-    </div>`);
-}
-
-// 删除配置
-function deleteConfig(name){
-  if(!confirm(`确认删除配置 "${name}" 吗？`)) return;
-  fetch(`/delete_config/${name}`,{method:'DELETE'})
-    .then(r=>r.json()).then(j=>{
-      alert(j.message);
-      location.reload();
-    });
-}
-
-// 点击“新建”
-$('#btn-new').click(()=>{
-  $('#cfg-form')[0].reset();
-  $('#cfg-file-type').val('movie'); // 新建时默认为电影
-  $('#path-mappings').empty();
-  $('#cfg-enable-scrape').trigger('change');
-  addPath();
-  openEditor();
-});
-
-// 编辑已有配置
-function editConfig(name){
-  fetch(`/get_config/${name}`)
-    .then(r=>r.json())
-    .then(cfg=>{
-      openEditor();
-      $('#cfg-name').val(cfg.name);
-      $('#cfg-file-type').val(cfg.file_type || 'movie'); // 加载文件类型，默认为 movie
-      $('#cfg-tmdb-api-key').val(cfg.tmdb_api_key || "");
-      $('#cfg-suffixes').val(cfg.file_suffixes);
-      $('#cfg-rename').val(cfg.rename_rule);
-      $('#cfg-interval').val(cfg.schedule_interval || 0);
-      $('#path-mappings').empty();
-      $('#cfg-enable-scrape').prop('checked', cfg.scrape_metadata !== false);
-      $('#cfg-enable-rename').prop('checked', cfg.rename_file !== false);
-      cfg.paths.forEach(p=> addPath(p.source,p.target));
-      $('#cfg-enable-scrape').trigger('change'); // 联动同步状态
-    });
-}
-
-// 保存配置
-function saveConfig(e){
-  e.preventDefault();
-  const name = $('#cfg-name').val().trim();
-  const file_type = $('#cfg-file-type').val(); // 获取文件类型
-  const tmdb_api_key = $('#cfg-tmdb-api-key').val().trim();
-  const suffixes = $('#cfg-suffixes').val().trim();
-  const rename_rule = $('#cfg-rename').val().trim();
-  const schedule_interval = parseInt($('#cfg-interval').val(),10) || 0;
-  const scrape_metadata =  $('#cfg-enable-scrape').prop('checked');
-  const rename_file = $('#cfg-enable-rename').prop('checked');
-  const paths = [];
-  $('#path-mappings .form-row').each(function(){
-    const src = $(this).find('input').eq(0).val().trim();
-    const dst = $(this).find('input').eq(1).val().trim();
-    paths.push({source: src, target: dst});
-  });
-  fetch('/save_config',{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    // 在发送的数据中包含 file_type
-    body: JSON.stringify({
-      name, file_type, tmdb_api_key: tmdb_api_key, file_suffixes: suffixes, 
-      paths, rename_rule, schedule_interval,
-      scrape_metadata,rename_file})
-  })
-  .then(r=>r.json())
-  .then(j=>{
-    alert(j.message);
-    closeEditor();
-    location.reload();
-  });
-}
-
-function runSingleConfig(name) {
-
-  // 打开进度模态框并初始化
-  $('#progressModal').modal('show');
-  $('#progress-bar').css('width','0%').text('0%');
-  $('#progress-text').text('等待开始...');
-  $('#success-count').text('0');
-  $('#failed-count').text('0');
-  $('#error-details').empty();
-  $('#error-list').hide();
-  $('#complete-message').hide().removeClass('alert-danger alert-success alert-warning');
-
-  // 发送请求执行指定配置
-  fetch(`/run_config/${name}`, { method: 'POST' })
-    .then(response => {
-      if (!response.ok) return response.json().then(e => { throw new Error(e.message || '执行失败'); });
-      return response.json();
-    })
-    .then(() => {
-      $('#progress-text').text('任务已启动，正在获取进度...');
-      // 开始轮询进度（可复用你已有的轮询逻辑）
-      startProgressPolling();
-    })
-    .catch(error => {
-      const msgDiv = $('#complete-message');
-      msgDiv.removeClass('alert-success alert-warning').addClass('alert-danger')
-           .html(`任务启动失败：${error.message}`)
-           .show();
-      $('#progress-bar').parent().hide();
-      $('#progress-stats').hide();
-    });
-}
-
-
-// 启动任务并监控进度
-$('#btn-run').click(()=>{
-  // 重置进度显示
-  let startTime = Date.now();
-  $('#progress-bar').css('width','0%').text('0%');
-  $('#progress-text').text('等待开始，正在检查TMDB连通性...'); // 初始状态
-  $('#success-count').text('0');
-  $('#failed-count').text('0');
-  $('#error-details').empty();
-  $('#error-list').hide();
-  $('#complete-message').hide().removeClass('alert-danger alert-success alert-warning'); // 清除旧样式
-
-  $('#progressModal').modal('show');
-
-  fetch('/run_task',{method:'POST'})
-    .then(response => { // <--- 处理响应
-      if (!response.ok) { // 检查 HTTP 状态码是否表示成功 (例如 2xx)
-        // 如果状态码不是 202 Accepted，说明任务启动失败 (例如 TMDB 检查失败返回 503)
-        return response.json().then(err => { throw new Error(err.message || `任务启动失败，状态码: ${response.status}`); });
-      }
-      // 如果状态码是 202，表示任务已接受并开始在后台运行
-      return response.json(); // 继续处理正常的启动消息（虽然我们这里不直接用它）
-    })
-    .then(()=>{ // <--- 只有在 fetch 成功 (状态码 202) 时才执行
-      // 任务已成功启动，开始轮询进度
-      $('#progress-text').text('任务已启动，正在获取进度...'); // 更新状态
-      let lastProcessed = -1; // 初始化为 -1 确保第一次更新能显示
-      // 每秒刷新一次进度
-      const timer = setInterval(()=>{
-        fetch('/progress').then(r=>r.json()).then(p=>{
-          if(p.processed >= lastProcessed) {
-            const pct = p.total>0 ? Math.floor(p.processed*100/p.total) : 0;
-            $('#progress-bar').css('width',pct+'%').text(pct+'%');
-            $('#progress-text').text(`${p.processed} / ${p.total}`);
-            const elapsedMs = Date.now() - startTime;
-            const elapsedSec = Math.floor(elapsedMs / 1000);
-            const hours = String(Math.floor(elapsedSec / 3600)).padStart(2, '0');
-            const minutes = String(Math.floor((elapsedSec % 3600) / 60)).padStart(2, '0');
-            const seconds = String(elapsedSec % 60).padStart(2, '0');
-            $('#elapsed-time').text(`耗时：${hours}:${minutes}:${seconds}`);
-            $('#success-count').text(p.success || 0);
-            $('#failed-count').text(p.failed || 0);
-
-            // 显示错误详情
-            if(p.errors && p.errors.length > 0) {
-              const errorList = $('#error-details');
-              // 优化：只添加新的错误，避免重复渲染 (如果需要)
-              // 这里简单起见，每次都清空重填
-              errorList.empty();
-              p.errors.forEach(error => {
-                const configName = error.config_name ? `[${error.config_name}] ` : '';
-                errorList.append(`
-                  <li class="mb-2">
-                    <strong>${configName}${error.file}</strong><br>
-                    <code>${error.message}</code>
-                  </li>
-                `);
-              });
-              
-              $('#error-list').show();
-            } else {
-              $('#error-list').hide(); // 没有错误时隐藏列表
-            }
-
-            lastProcessed = p.processed;
-          }
-
-          if(p.completed || (p.processed >= p.total && p.total > 0 && p.total !== 0)){ // 确保 total 不为 0
-            clearInterval(timer);
-            // 显示完成消息
-            const failed = p.failed || 0;
-            const msgDiv = $('#complete-message');
-            const logPath = p.log_path || '/logs/media_manager.log'; // 使用后端提供的日志路径
-
-            if(failed === 0 && (!p.errors || p.errors.length === 0)){ // 确保没有错误记录
-              msgDiv.removeClass('alert-warning alert-danger').addClass('alert-success')
-                   .html('✅ 任务完成！所有文件处理成功。');
-            } else {
-              msgDiv.removeClass('alert-success alert-danger').addClass('alert-warning')
-                   .html(`⚠️ 任务完成！${failed}个文件处理失败。<br>
-                         详细错误信息已保存至日志。<br>日志路径: <code class="bg-light p-1">${logPath}</code>`);
-            }
-            msgDiv.show();
-          }
-        }).catch(progressError => { // <--- 处理 /progress 请求本身的错误
-            console.error("获取进度失败:", progressError);
-            clearInterval(timer); // 停止轮询
-            const msgDiv = $('#complete-message');
-            msgDiv.removeClass('alert-success alert-warning').addClass('alert-danger')
-                 .html(`❌ 获取任务进度时出错: ${progressError.message}`)
-                 .show();
-        });
-      }, 1000);
-    })
-    .catch(error => { // <--- 捕获 /run_task 的错误 (包括我们抛出的 Error)
-      console.error("启动任务失败:", error);
-      // 在模态框中显示启动错误信息
-      const msgDiv = $('#complete-message');
-      msgDiv.removeClass('alert-success alert-warning').addClass('alert-danger')
-           .html(`❌ 任务启动失败: ${error.message}`)
-           .show();
-      // 可以选择隐藏进度条等元素
-      $('#progress-bar').parent().hide();
-      $('#progress-stats').hide();
-    });
-});
-
-$(document).on('change', '#cfg-enable-scrape', function () {
-  const isEnabled = this.checked;
-  const $renameCheckbox = $('#cfg-enable-rename');
-  const $renameHint = $('#rename-hint');
-
-  $renameCheckbox.prop('disabled', !isEnabled);
-  $renameHint.toggleClass('text-danger', !isEnabled)
-             .toggleClass('text-muted', isEnabled);
-
-  if (!isEnabled) {
-    $renameCheckbox.prop('checked', false);
+  /* ------------------------------------------------------------------ */
+  /* 通用                                                               */
+  /* ------------------------------------------------------------------ */
+  function toast(message, type, timeout) {
+    var stack = $('#toast-stack');
+    if (!stack) { return; }
+    var node = document.createElement('div');
+    node.className = 'toast is-' + (type || 'info');
+    var text = document.createElement('span');
+    text.textContent = message;
+    node.appendChild(text);
+    stack.appendChild(node);
+    setTimeout(function () {
+      node.classList.add('is-hide');
+      setTimeout(function () { node.remove(); }, 220);
+    }, timeout || 3600);
   }
-});
 
-$(document).on('change', '.config-toggle', function () {
-  const name = $(this).data('name');
-  const enabled = this.checked;
+  function formatSize(bytes) {
+    bytes = Number(bytes) || 0;
+    if (bytes >= 1024 * 1024 * 1024) { return (bytes / Math.pow(1024, 3)).toFixed(2) + ' GB'; }
+    if (bytes >= 1024 * 1024) { return (bytes / Math.pow(1024, 2)).toFixed(2) + ' MB'; }
+    if (bytes >= 1024) { return (bytes / 1024).toFixed(1) + ' KB'; }
+    return bytes + ' B';
+  }
 
-  fetch(`/toggle_config/${name}`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({enabled})
-  }).then(r => r.json())
-    .then(j => console.log(j.message))
-    .catch(e => alert("更新失败：" + e.message));
-});
+  function formatElapsed(seconds) {
+    seconds = Math.max(0, Math.floor(Number(seconds) || 0));
+    var h = String(Math.floor(seconds / 3600)).padStart(2, '0');
+    var m = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
+    var s = String(seconds % 60).padStart(2, '0');
+    return h + ':' + m + ':' + s;
+  }
 
-$(document).ready(function () {
-  loadStats(); // 页面加载时自动加载
-});
+  function setText(sel, value) {
+    var el = $(sel);
+    if (el) { el.textContent = value; }
+  }
 
-function startProgressPolling() {
-  let startTime = Date.now();
-  let lastProcessed = -1;
+  function setRunButtonsDisabled(disabled) {
+    $$('[data-action="run-all"], [data-action="run"]').forEach(function (btn) {
+      btn.disabled = disabled;
+    });
+  }
 
-  const timer = setInterval(() => {
-    fetch('/progress')
-      .then(r => r.json())
-      .then(p => {
-        if (p.processed >= lastProcessed) {
-          const pct = p.total > 0 ? Math.floor(p.processed * 100 / p.total) : 0;
-          $('#progress-bar').css('width', pct + '%').text(pct + '%');
-          $('#progress-text').text(`${p.processed} / ${p.total}`);
-          const elapsedMs = Date.now() - startTime;
-          const elapsedSec = Math.floor(elapsedMs / 1000);
-          const hours = String(Math.floor(elapsedSec / 3600)).padStart(2, '0');
-          const minutes = String(Math.floor((elapsedSec % 3600) / 60)).padStart(2, '0');
-          const seconds = String(elapsedSec % 60).padStart(2, '0');
-          $('#elapsed-time').text(`耗时：${hours}:${minutes}:${seconds}`);
-          $('#success-count').text(p.success || 0);
-          $('#failed-count').text(p.failed || 0);
+  /* ------------------------------------------------------------------ */
+  /* 媒体库统计                                                         */
+  /* ------------------------------------------------------------------ */
+  function loadStats() {
+    setText('#stats-meta', '正在统计…');
+    fetch('/stats', { cache: 'no-store' })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data.error) { throw new Error(data.error); }
+        var movie = data.movie || 0;
+        var tv = data.tv_show || 0;
+        var total = movie + tv;
+        var size = data.size || {};
 
-          // 错误列表
-          if (p.errors && p.errors.length > 0) {
-            const errorList = $('#error-details');
-            errorList.empty();
-            p.errors.forEach(error => {
-              const configName = error.config_name ? `[${error.config_name}] ` : '';
-              errorList.append(`
-                <li class="mb-2">
-                  <strong>${configName}${error.file}</strong><br>
-                  <code>${error.message}</code>
-                </li>
-              `);
-            });
-            $('#error-list').show();
-          } else {
-            $('#error-list').hide();
-          }
+        setText('#stat-movie', movie);
+        setText('#stat-tv', tv);
+        setText('#stat-total', total);
+        setText('#stat-movie-size', formatSize(size.movie));
+        setText('#stat-tv-size', formatSize(size.tv_show));
+        setText('#stat-total-size', formatSize((size.movie || 0) + (size.tv_show || 0)));
 
-          lastProcessed = p.processed;
+        var pct = function (n) { return total > 0 ? (n / total * 100).toFixed(2) + '%' : '0%'; };
+        var bar = $('#distribution-bar');
+        if (bar) {
+          bar.children[0].style.width = pct(movie);
+          bar.children[1].style.width = pct(tv);
         }
 
-        if (p.completed || (p.processed >= p.total && p.total > 0)) {
-          clearInterval(timer);
-          const failed = p.failed || 0;
-          const msgDiv = $('#complete-message');
-          const logPath = p.log_path || '/logs/media_manager.log';
+        // 把“按配置兜底 / 空文件 / 读不到大小”说清楚，避免误以为是统计错误
+        var notes = [];
+        if ((data.fallback || 0) > 0) {
+          notes.push((data.fallback) + ' 个文件名没年份或季集，已按配置的媒体类型处理');
+        }
+        if ((data.empty || 0) > 0) { notes.push((data.empty) + ' 个是 0 字节空文件'); }
+        if ((data.unreadable || 0) > 0) { notes.push((data.unreadable) + ' 个读不到大小'); }
+        var meta = data.scanned_at ? '统计于 ' + data.scanned_at : '';
+        if (notes.length) { meta += ' · ' + notes.join('，'); }
+        setText('#stats-meta', meta);
+      })
+      .catch(function (err) {
+        setText('#stats-meta', '统计失败');
+        toast('媒体库统计失败：' + err.message, 'error');
+      });
+  }
 
-          if (failed === 0 && (!p.errors || p.errors.length === 0)) {
-            msgDiv.removeClass('alert-warning alert-danger').addClass('alert-success')
-              .html('任务完成，所有文件处理成功。');
-          } else {
-            msgDiv.removeClass('alert-success alert-danger').addClass('alert-warning')
-              .html(`任务完成，有 ${failed} 个失败。<br>日志路径: <code>${logPath}</code>`);
-          }
-          msgDiv.show();
+  /* ------------------------------------------------------------------ */
+  /* 编辑抽屉                                                           */
+  /* ------------------------------------------------------------------ */
+  function addPathRow(src, dst) {
+    var list = $('#path-mappings');
+    if (!list) { return; }
+    var row = document.createElement('div');
+    row.className = 'path-row';
+
+    var srcInput = document.createElement('input');
+    srcInput.className = 'form-control';
+    srcInput.placeholder = '源路径，例如 /media/downloads';
+    srcInput.value = src || '';
+
+    var dstInput = document.createElement('input');
+    dstInput.className = 'form-control';
+    dstInput.placeholder = '目标路径，例如 /media/movies';
+    dstInput.value = dst || '';
+
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'icon-btn';
+    remove.dataset.action = 'remove-path';
+    remove.title = '移除该映射';
+    remove.textContent = '✕';
+
+    row.appendChild(srcInput);
+    row.appendChild(document.createElement('span')).className = 'path-arrow';
+    row.lastChild.textContent = '→';
+    row.appendChild(dstInput);
+    row.appendChild(remove);
+    list.appendChild(row);
+  }
+
+  function openEditor(name) {
+    state.editingName = name || null;
+    setText('#editor-title', name ? '编辑配置' : '新建配置');
+
+    var form = $('#cfg-form');
+    if (form) { form.reset(); }
+    $('#path-mappings').innerHTML = '';
+    $('#cfg-enable-scrape').checked = true;
+    $('#cfg-enable-rename').checked = true;
+    $('#cfg-fix-permissions').checked = true;
+    $('#cfg-link-mode').value = 'hardlink';
+    $('#cfg-file-type').value = 'movie';
+    $('#cfg-interval').value = 0;
+    $('#cfg-threads').value = 4;
+    $('#cfg-rename').value = '';
+    selectPermMode(PERM_DEFAULT.dir, PERM_DEFAULT.file);
+
+    var fixBtn = $('#btn-fix-permissions');
+    if (fixBtn) {
+      fixBtn.disabled = !name;
+      fixBtn.title = name ? '对已有目标目录递归应用下面的权限' : '保存配置后可用';
+    }
+
+    if (name) {
+      fillConfig(name);
+    } else {
+      addPathRow();
+    }
+
+    $('#editor-panel').classList.add('open');
+    $('#editor-panel').setAttribute('aria-hidden', 'false');
+    $('#drawer-backdrop').classList.add('open');
+    setTimeout(function () { $('#cfg-name').focus(); }, 220);
+  }
+
+  function fillConfig(name) {
+    fetch('/get_config/' + encodeURIComponent(name))
+      .then(function (res) {
+        if (!res.ok) { throw new Error('配置不存在'); }
+        return res.json();
+      })
+      .then(function (cfg) {
+        $('#cfg-name').value = cfg.name || '';
+        $('#cfg-file-type').value = cfg.file_type || 'movie';
+        $('#cfg-link-mode').value = cfg.link_mode || 'hardlink';
+        $('#cfg-tmdb-api-key').value = cfg.tmdb_api_key || '';
+        $('#cfg-suffixes').value = cfg.file_suffixes || '';
+        $('#cfg-rename').value = cfg.rename_rule || '';
+        $('#cfg-interval').value = cfg.schedule_interval || 0;
+        $('#cfg-threads').value = cfg.max_threads || 4;
+        $('#cfg-enable-scrape').checked = cfg.scrape_metadata !== false;
+        $('#cfg-enable-rename').checked = cfg.rename_file !== false;
+        $('#cfg-fix-permissions').checked = cfg.fix_permissions !== false;
+        selectPermMode(cfg.dir_mode || PERM_DEFAULT.dir,
+                       cfg.file_mode || PERM_DEFAULT.file);
+
+        $('#path-mappings').innerHTML = '';
+        (cfg.paths || []).forEach(function (p) { addPathRow(p.source, p.target); });
+        if (!(cfg.paths || []).length) { addPathRow(); }
+      })
+      .catch(function (err) { toast('读取配置失败：' + err.message, 'error'); });
+  }
+
+  function closeEditor() {
+    $('#editor-panel').classList.remove('open');
+    $('#editor-panel').setAttribute('aria-hidden', 'true');
+    $('#drawer-backdrop').classList.remove('open');
+    state.editingName = null;
+  }
+
+  function saveConfig(event) {
+    event.preventDefault();
+
+    var name = $('#cfg-name').value.trim();
+    if (!name) { toast('请填写配置名称', 'warn'); return; }
+
+    var paths = $$('#path-mappings .path-row').map(function (row) {
+      var inputs = row.querySelectorAll('input');
+      return { source: inputs[0].value.trim(), target: inputs[1].value.trim() };
+    }).filter(function (p) { return p.source && p.target; });
+
+    if (!paths.length) { toast('至少需要一组完整的路径映射', 'warn'); return; }
+
+    var modes = currentPermissionModes();
+    if (!modes) { return; }
+
+    var payload = {
+      name: name,
+      file_type: $('#cfg-file-type').value,
+      link_mode: $('#cfg-link-mode').value,
+      tmdb_api_key: $('#cfg-tmdb-api-key').value.trim(),
+      file_suffixes: $('#cfg-suffixes').value.trim(),
+      rename_rule: $('#cfg-rename').value.trim(),
+      schedule_interval: parseInt($('#cfg-interval').value, 10) || 0,
+      max_threads: parseInt($('#cfg-threads').value, 10) || 4,
+      scrape_metadata: $('#cfg-enable-scrape').checked,
+      rename_file: $('#cfg-enable-rename').checked,
+      fix_permissions: $('#cfg-fix-permissions').checked,
+      dir_mode: modes.dir,
+      file_mode: modes.file,
+      paths: paths,
+    };
+
+    fetch('/save_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          if (!res.ok) { throw new Error(body.message || '保存失败'); }
+          return body;
+        });
+      })
+      .then(function (body) {
+        closeEditor();
+        toast(body.message || '保存成功', 'success');
+        setTimeout(function () { location.reload(); }, 600);
+      })
+      .catch(function (err) { toast('保存失败：' + err.message, 'error', 5000); });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 配置动作                                                           */
+  /* ------------------------------------------------------------------ */
+  function deleteConfig(name) {
+    if (!window.confirm('确认删除配置「' + name + '」吗？已链接的文件不会被删除。')) { return; }
+    fetch('/delete_config/' + encodeURIComponent(name), { method: 'DELETE' })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          if (!res.ok) { throw new Error(body.message || '删除失败'); }
+          return body;
+        });
+      })
+      .then(function (body) {
+        toast(body.message || '已删除', 'success');
+        setTimeout(function () { location.reload(); }, 500);
+      })
+      .catch(function (err) { toast('删除失败：' + err.message, 'error'); });
+  }
+
+  function toggleConfig(name, enabled) {
+    fetch('/toggle_config/' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled }),
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (body) {
+        var card = $('.config-card[data-name="' + CSS.escape(name) + '"]');
+        if (card) { card.classList.toggle('is-disabled', !enabled); }
+        toast(body.message || '状态已更新', enabled ? 'success' : 'info');
+      })
+      .catch(function (err) { toast('更新失败：' + err.message, 'error'); });
+  }
+
+  function clearProcessed() {
+    if (!window.confirm('清空处理记录后，下次执行会重新扫描已处理过的文件（已链接的文件会按 inode 自动跳过）。继续？')) {
+      return;
+    }
+    fetch('/clear_processed', { method: 'POST' })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          if (!res.ok) { throw new Error(body.message || '操作失败'); }
+          return body;
+        });
+      })
+      .then(function (body) {
+        toast(body.message, 'success', 5000);
+        loadProcessed();
+      })
+      .catch(function (err) { toast('清空失败：' + err.message, 'error'); });
+  }
+
+  /* 处理记录状态：升级 / 重建容器后用它确认记录是否还在 */
+  function loadProcessed() {
+    fetch('/processed', { cache: 'no-store' })
+      .then(function (res) { return res.json(); })
+      .then(function (info) {
+        var el = $('#processed-meta');
+        if (!el) { return; }
+        el.textContent = '已记录 ' + (info.count || 0) + ' 个已处理文件';
+        el.title = '记录文件：' + (info.path || 'configs/processed.txt')
+          + (info.updated_at ? '\n最后更新：' + info.updated_at : '')
+          + '\n升级或重建容器后，如果这里变成 0，说明 configs 目录没有挂载出来。';
+      })
+      .catch(function () { /* 忽略 */ });
+  }
+
+  /* 权限：把八进制藏在“自定义”里，默认用中文选项表达 */
+  var PERM_DEFAULT = { dir: '2775', file: '664' };
+
+  function permRadios() {
+    return $$('input[name="perm-mode"]');
+  }
+
+  function selectedPermRadio() {
+    return permRadios().filter(function (r) { return r.checked; })[0] || null;
+  }
+
+  function syncPermUi() {
+    var selected = selectedPermRadio();
+    permRadios().forEach(function (radio) {
+      var option = radio.closest('.perm-option');
+      if (option) { option.classList.toggle('is-active', radio.checked); }
+    });
+
+    var isCustom = !selected || selected.value === 'custom';
+    var custom = $('#perm-custom');
+    if (custom) { custom.hidden = !isCustom; }
+
+    var warning = $('#perm-warning');
+    if (warning) { warning.hidden = !(selected && selected.value === 'private'); }
+  }
+
+  function selectPermMode(dirMode, fileMode) {
+    var dirValue = parseInt(dirMode, 8);
+    var fileValue = parseInt(fileMode, 8);
+    var radios = permRadios();
+    var match = null;
+
+    radios.forEach(function (radio) {
+      if (radio.value === 'custom') { return; }
+      if (parseInt(radio.dataset.dir, 8) === dirValue
+        && parseInt(radio.dataset.file, 8) === fileValue) {
+        match = radio;
+      }
+    });
+
+    if (!match) {
+      match = radios.filter(function (r) { return r.value === 'custom'; })[0] || null;
+      if ($('#cfg-dir-mode')) { $('#cfg-dir-mode').value = dirMode || PERM_DEFAULT.dir; }
+      if ($('#cfg-file-mode')) { $('#cfg-file-mode').value = fileMode || PERM_DEFAULT.file; }
+    }
+
+    // 显式清理选中状态，不依赖浏览器对同名 radio 的默认互斥行为
+    radios.forEach(function (radio) { radio.checked = false; });
+    if (match) { match.checked = true; }
+    syncPermUi();
+  }
+
+  function currentPermissionModes() {
+    var selected = selectedPermRadio();
+    if (selected && selected.value !== 'custom') {
+      return { dir: selected.dataset.dir, file: selected.dataset.file, label: selected.value };
+    }
+    var dir = ($('#cfg-dir-mode').value || '').trim();
+    var file = ($('#cfg-file-mode').value || '').trim();
+    if (!/^[0-7]{3,4}$/.test(dir) || !/^[0-7]{3,4}$/.test(file)) {
+      toast('自定义权限需要 3~4 位八进制数字，例如目录 2775、文件 664', 'warn', 5000);
+      return null;
+    }
+    return { dir: dir, file: file, label: 'custom' };
+  }
+
+  function permLabel(modes) {
+    var names = {
+      private: '只有我能改',
+      group: '我和同组成员都能改',
+      open: '任何账号都能改',
+    };
+    return names[modes.label] || ('目录 ' + modes.dir + ' / 文件 ' + modes.file);
+  }
+
+  function fixPermissions() {
+    var name = state.editingName;
+    if (!name) { toast('请先保存配置，再修正已有目录权限', 'warn'); return; }
+
+    var modes = currentPermissionModes();
+    if (!modes) { return; }
+
+    var btn = $('#btn-fix-permissions');
+    var original = btn.textContent;
+
+    if (!window.confirm('将对「' + name + '」的目标目录递归应用「' + permLabel(modes)
+      + '」的权限（目录 ' + modes.dir + '、文件 ' + modes.file + '）。\n\n'
+      + '注意：硬链接文件与源文件共享同一份数据，源文件权限也会一起改变。继续？')) {
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '正在修正…';
+
+    fetch('/fix_permissions/' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dir_mode: modes.dir, file_mode: modes.file }),
+    })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          if (!res.ok) { throw new Error(body.message || '修正失败'); }
+          return body;
+        });
+      })
+      .then(function (body) { toast(body.message, 'success', 6000); })
+      .catch(function (err) { toast('权限修正失败：' + err.message, 'error', 6000); })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = original;
+      });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 进度面板                                                           */
+  /* ------------------------------------------------------------------ */
+  function resetProgressDisplay() {
+    $('#progress-fill').style.width = '0%';
+    setText('#progress-percent', '0%');
+    setText('#progress-count', '0 / 0');
+    setText('#progress-elapsed', '耗时 00:00:00');
+    setText('#count-success', '0');
+    setText('#count-skipped', '0');
+    setText('#count-failed', '0');
+    setText('#count-linked', '0');
+    $('#error-list').innerHTML = '';
+    $('#error-block').hidden = true;
+    var result = $('#result-block');
+    result.hidden = true;
+    result.className = 'result-block';
+    result.textContent = '';
+  }
+
+  function setStage(text) { setText('#progress-stage', text || ''); }
+
+  function openProgress(title) {
+    setText('#progress-title', title || '任务进度');
+    $('#progress-overlay').classList.add('open');
+    $('#progress-overlay').setAttribute('aria-hidden', 'false');
+  }
+
+  function closeProgress() {
+    $('#progress-overlay').classList.remove('open');
+    $('#progress-overlay').setAttribute('aria-hidden', 'true');
+    if (state.running) {
+      stopPolling();
+      toast('任务仍在后台执行，刷新页面可重新查看进度', 'info', 5000);
+    }
+  }
+
+  function showProgressError(message) {
+    var block = $('#result-block');
+    block.hidden = false;
+    block.className = 'result-block is-error';
+    block.textContent = '❌ ' + message;
+    setStage('任务未启动');
+    state.running = false;
+    setRunButtonsDisabled(false);
+  }
+
+  function renderErrors(errors) {
+    var block = $('#error-block');
+    var list = $('#error-list');
+    if (!errors || !errors.length) { block.hidden = true; return; }
+
+    block.hidden = false;
+    setText('#error-count', String(errors.length));
+    list.innerHTML = '';
+
+    var limit = 100;
+    errors.slice(0, limit).forEach(function (item) {
+      var wrap = document.createElement('div');
+      wrap.className = 'error-item';
+
+      var file = document.createElement('div');
+      file.className = 'error-file';
+      file.textContent = (item.config_name ? '[' + item.config_name + '] ' : '') + (item.file || '未知文件');
+      wrap.appendChild(file);
+
+      if (item.message) {
+        var msg = document.createElement('div');
+        msg.className = 'error-msg';
+        msg.textContent = item.message;
+        wrap.appendChild(msg);
+      }
+      list.appendChild(wrap);
+    });
+
+    if (errors.length > limit) {
+      var more = document.createElement('p');
+      more.className = 'hint';
+      more.textContent = '另有 ' + (errors.length - limit) + ' 条失败记录，请查看日志';
+      list.appendChild(more);
+    }
+  }
+
+  function renderProgress(p) {
+    var total = p.total || 0;
+    var processed = p.processed || 0;
+    var percent = total > 0 ? Math.min(100, Math.floor(processed * 100 / total)) : 0;
+
+    $('#progress-fill').style.width = percent + '%';
+    setText('#progress-percent', percent + '%');
+    setText('#progress-count', total > 0 ? processed + ' / ' + total : '正在扫描源目录…');
+    setText('#progress-elapsed', '耗时 ' + formatElapsed(p.elapsed));
+    setText('#count-success', p.success || 0);
+    setText('#count-skipped', p.skipped || 0);
+    setText('#count-failed', p.failed || 0);
+    setText('#count-linked', p.linked || 0);
+    setText('#log-path', p.log_path || '—');
+
+    var stage = p.stage || '处理中';
+    if (p.current_config) { stage += ' · ' + p.current_config; }
+    setStage(stage);
+
+    renderErrors(p.errors);
+  }
+
+  function stopPolling() {
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+  }
+
+  function finishProgress(p) {
+    state.running = false;
+    setRunButtonsDisabled(false);
+    stopPolling();
+
+    var block = $('#result-block');
+    block.hidden = false;
+    var failed = p.failed || 0;
+    var summary = '成功 ' + (p.success || 0) + ' 个，跳过 ' + (p.skipped || 0) + ' 个';
+    if (failed > 0) {
+      block.className = 'result-block is-warn';
+      block.textContent = '⚠️ 任务完成：' + summary + '，失败 ' + failed + ' 个，详见上方列表与日志';
+    } else {
+      block.className = 'result-block';
+      block.textContent = '✅ 任务完成：' + summary + '，没有失败项';
+    }
+    setStage('已完成');
+    loadStats();
+    loadProcessed();
+  }
+
+  function tick() {
+    fetch('/progress', { cache: 'no-store' })
+      .then(function (res) {
+        if (!res.ok) { throw new Error('HTTP ' + res.status); }
+        return res.json();
+      })
+      .then(function (p) {
+        renderProgress(p);
+        if (!p.running && p.completed) {
+          finishProgress(p);
         }
       })
-      .catch(progressError => {
-        console.error("进度获取失败:", progressError);
-        clearInterval(timer);
-        const msgDiv = $('#complete-message');
-        msgDiv.removeClass('alert-success alert-warning').addClass('alert-danger')
-          .html(`获取任务进度失败：${progressError.message}`)
-          .show();
+      .catch(function (err) {
+        stopPolling();
+        state.running = false;
+        setRunButtonsDisabled(false);
+        showProgressError('获取进度失败：' + err.message);
       });
-  }, 1000);
-}
+  }
 
+  function beginPolling() {
+    stopPolling();
+    state.running = true;
+    setRunButtonsDisabled(true);
+    state.pollTimer = setInterval(tick, 1000);
+    tick();
+  }
+
+  function startRun(url, label) {
+    if (state.running) { toast('已有任务在运行', 'warn'); return; }
+    openProgress(label ? '执行配置：' + label : '执行全部任务');
+    resetProgressDisplay();
+    setStage('正在提交任务…');
+
+    fetch(url, { method: 'POST' })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          if (!res.ok) { throw new Error(body.message || '启动失败（HTTP ' + res.status + '）'); }
+          return body;
+        });
+      })
+      .then(function (body) {
+        setStage(body.message || '任务已启动…');
+        beginPolling();
+      })
+      .catch(function (err) { showProgressError(err.message); });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 事件绑定                                                           */
+  /* ------------------------------------------------------------------ */
+  document.addEventListener('click', function (event) {
+    var trigger = event.target.closest('[data-action]');
+    if (!trigger) { return; }
+    var action = trigger.dataset.action;
+    var name = trigger.dataset.name;
+
+    switch (action) {
+      case 'new': openEditor(null); break;
+      case 'edit': openEditor(name); break;
+      case 'delete': deleteConfig(name); break;
+      case 'run': startRun('/run_config/' + encodeURIComponent(name), name); break;
+      case 'run-all': startRun('/run_task', null); break;
+      case 'close-editor': closeEditor(); break;
+      case 'add-path': addPathRow(); break;
+      case 'remove-path': {
+        var row = trigger.closest('.path-row');
+        if (row) { row.remove(); }
+        break;
+      }
+      case 'clear-processed': clearProcessed(); break;
+      case 'refresh-stats': loadStats(); break;
+      case 'close-progress': closeProgress(); break;
+      case 'fix-permissions': fixPermissions(); break;
+      default: break;
+    }
+  });
+
+  document.addEventListener('change', function (event) {
+    var el = event.target;
+    if (el.classList && el.classList.contains('config-toggle')) {
+      toggleConfig(el.dataset.name, el.checked);
+      return;
+    }
+    if (el.name === 'perm-mode') { syncPermUi(); }
+  });
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') { return; }
+    if ($('#progress-overlay').classList.contains('open')) { closeProgress(); }
+    else if ($('#editor-panel').classList.contains('open')) { closeEditor(); }
+  });
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var form = $('#cfg-form');
+    if (form) { form.addEventListener('submit', saveConfig); }
+    syncPermUi();
+    loadStats();
+    loadProcessed();
+    // 页面刷新后如果任务仍在运行，自动接上进度
+    fetch('/progress', { cache: 'no-store' })
+      .then(function (res) { return res.json(); })
+      .then(function (p) {
+        if (p.running) {
+          openProgress('任务进行中');
+          beginPolling();
+        }
+      })
+      .catch(function () { /* 忽略 */ });
+  });
+})();

@@ -1,0 +1,19 @@
+# 构建上下文排除项（避免把本地环境、测试数据、运行记录打进镜像）
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.github/
+configs/
+logs/
+/favicon.ico
+testdata/
+hardlinktest/
+.run.pid
+*.log
+.DS_Store
+docker-compose.yml

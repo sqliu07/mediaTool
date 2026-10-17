@@ -1,52 +1,160 @@
-import os
+"""MediaTool Web 层：配置管理、任务调度、进度上报。"""
+
 import json
 import logging
+import os
 import secrets
-from threading import Thread
+import threading
+import time
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify
+
 from apscheduler.schedulers.background import BackgroundScheduler
+from flask import Flask, jsonify, render_template, request
 
-from movie_processor import process_movies
-from metadata_fetcher import check_tmdb_connection
 from filename_parser import parse_filename
+from metadata_fetcher import check_tmdb_connection
+from movie_processor import (
+    DEFAULT_DIR_MODE,
+    DEFAULT_FILE_MODE,
+    DEFAULT_FILE_SUFFIXES,
+    STATUS_FAILED,
+    apply_permission_tree,
+    collect_tasks,
+    clear_processed,
+    mode_to_string,
+    normalize_suffixes,
+    parse_mode,
+    process_movies,
+    processed_stats,
+    suffix_set,
+)
 
+CONFIG_DIR = os.getenv("MEDIATOOL_CONFIG_DIR", "configs")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+LOG_DIR = os.getenv("MEDIATOOL_LOG_DIR", "logs")
 
-CONFIG_FILE = "configs/config.json"
+for _directory in (CONFIG_DIR, LOG_DIR):
+    if not os.path.exists(_directory):
+        os.makedirs(_directory, exist_ok=True)
 
-# 创建日志目录
-LOG_DIR = "logs"
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
-
-# 生成日志文件名（包含时间戳）
 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_filename = os.path.join(LOG_DIR, f"media_tools_{current_time}.log")
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY") or secrets.token_hex(16)
 
-# 日志初始化
-logging.basicConfig(level=logging.DEBUG,
-                   format='%(asctime)s - %(levelname)s - %(message)s',
-                   handlers=[
-                       logging.StreamHandler(),
-                       logging.FileHandler(log_filename, encoding="utf-8")
-                   ])
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler(log_filename, encoding="utf-8")],
+)
 logger = logging.getLogger("movie_manager")
 
-# 全局进度状态
+# 后台定时任务调度器
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+
+# ---------------------------------------------------------------------------
+# 进度状态（线程安全）
+# ---------------------------------------------------------------------------
+progress_lock = threading.Lock()
 progress = {
     "total": 0,
     "processed": 0,
     "success": 0,
     "failed": 0,
+    "skipped": 0,
+    "linked": 0,
     "completed": False,
+    "running": False,
+    "stage": "空闲",
+    "current_config": "",
+    "started_at": None,
+    "finished_at": None,
     "errors": [],
-    "log_path": log_filename  # 使用新的日志文件路径
+    "log_path": log_filename,
 }
 
-# 加载/保存配置
+
+def _progress_update(**fields):
+    with progress_lock:
+        progress.update(fields)
+
+
+def _progress_snapshot():
+    with progress_lock:
+        snapshot = dict(progress)
+        snapshot["errors"] = list(progress["errors"])
+    return snapshot
+
+
+def _begin_run(stage="准备中"):
+    """占用执行权；已有任务在跑时返回 False。"""
+    with progress_lock:
+        if progress["running"]:
+            return False
+        progress.update({
+            "total": 0, "processed": 0, "success": 0, "failed": 0,
+            "skipped": 0, "linked": 0, "completed": False, "running": True,
+            "stage": stage, "current_config": "", "started_at": time.time(),
+            "finished_at": None, "errors": [],
+        })
+        return True
+
+
+def _finish_run(stage="已完成"):
+    _progress_update(running=False, completed=True, stage=stage,
+                     finished_at=time.time(), current_config="")
+
+
+def _abort_run(message):
+    with progress_lock:
+        progress.update({
+            "running": False, "completed": True, "finished_at": time.time(),
+            "stage": message, "current_config": "",
+        })
+        progress["errors"].append({"file": "任务未启动", "message": message})
+
+
+def make_progress_callback(config_name=None, reset_on_initialize=True):
+    """统一的进度回调，把单文件结果汇总到全局 progress。"""
+
+    def progress_cb(event, value=None, success=True, error_info=None, action=None):
+        if event == "initialize":
+            with progress_lock:
+                if reset_on_initialize:
+                    progress.update({
+                        "total": int(value or 0), "processed": 0, "success": 0,
+                        "failed": 0, "skipped": 0, "linked": 0, "errors": [],
+                    })
+                progress["stage"] = "处理中"
+        elif event == "update":
+            with progress_lock:
+                progress["processed"] += int(value or 1)
+                if action == "skipped":
+                    progress["skipped"] += 1
+                elif success:
+                    progress["success"] += 1
+                    if action in ("linked", "copied", "symlinked"):
+                        progress["linked"] += 1
+                else:
+                    progress["failed"] += 1
+                    if error_info:
+                        item = dict(error_info)
+                        if config_name:
+                            item.setdefault("config_name", config_name)
+                        progress["errors"].append(item)
+        elif event == "complete":
+            with progress_lock:
+                progress["completed"] = True
+
+    return progress_cb
+
+
+# ---------------------------------------------------------------------------
+# 配置读写
+# ---------------------------------------------------------------------------
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -54,466 +162,436 @@ def load_config():
                 configs = json.load(f)
                 if isinstance(configs, list):
                     return configs
+                logger.error("配置文件格式不正确（应为列表）")
         except Exception as e:
             logger.error(f"加载配置出错：{e}")
     return []
 
+
 def save_config(configs):
     try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(configs, f, indent=4, ensure_ascii=False)
+        return True
     except Exception as e:
         logger.error(f"保存配置出错：{e}")
+        return False
 
-# APScheduler
-scheduler = BackgroundScheduler()
-scheduler.start()
 
-# --- 新增的辅助函数 ---
-# --- 修改后的辅助函数 ---
+# ---------------------------------------------------------------------------
+# TMDB 连通性
+# ---------------------------------------------------------------------------
+class TMDBError(Exception):
+    """TMDB 相关错误基类。"""
+
+
+class TMDBConnectionError(TMDBError):
+    """无法连接 TMDB。"""
+
+
+class TMDBApiKeyMissingError(TMDBError):
+    """配置中缺少 TMDB API Key。"""
+
+
 def _check_tmdb_connectivity(configs, task_type="任务"):
-    """
-    检查 TMDB 连接性。
-    遍历配置找到第一个 API Key 并检查连接。
-    成功则正常返回，失败则抛出相应的 TMDBError 异常。
-    """
-    first_api_key = None
-    for cfg in configs:
-        if cfg.get("tmdb_api_key"):
-            first_api_key = cfg["tmdb_api_key"]
-            break
-
-    if first_api_key:
-        logger.info(f"{task_type}：检查 TMDB 连接...")
-        if not check_tmdb_connection(first_api_key):
-            error_msg = f"{task_type}：无法连接到 TMDB，任务已终止。你可以配置hosts或代理以解决问题。"
-            logger.error(error_msg)
-            raise TMDBConnectionError(error_msg) # <--- 抛出连接错误异常
-        else:
-            logger.info(f"{task_type}：TMDB 连接检查通过。")
-            # 成功，不返回任何值 (隐式返回 None)
-    else:
-        error_msg = f"{task_type}：未配置 TMDB API Key，任务终止。"
-        logger.error(error_msg)
-        raise TMDBApiKeyMissingError(error_msg) # <--- 抛出 Key 缺失异常
+    api_key = next((c.get("tmdb_api_key") for c in configs if c.get("tmdb_api_key")), None)
+    if not api_key:
+        message = f"{task_type}：未配置 TMDB API Key，任务终止。"
+        logger.error(message)
+        raise TMDBApiKeyMissingError(message)
+    logger.info(f"{task_type}：检查 TMDB 连接...")
+    if not check_tmdb_connection(api_key):
+        message = f"{task_type}：无法连接到 TMDB，任务已终止。可配置 hosts 或代理后重试。"
+        logger.error(message)
+        raise TMDBConnectionError(message)
+    logger.info(f"{task_type}：TMDB 连接检查通过。")
 
 
+def _needs_tmdb(configs):
+    return any(cfg.get("scrape_metadata", True) for cfg in configs)
+
+
+# ---------------------------------------------------------------------------
+# 任务执行
+# ---------------------------------------------------------------------------
 def run_scheduled_task():
-    """后台定时执行的任务，处理所有配置"""
+    """定时任务：处理所有启用的配置。"""
     logger.info("定时任务开始执行...")
     configs = [cfg for cfg in load_config() if cfg.get("enabled", True)]
     if not configs:
-        logger.info("没有找到配置，定时任务跳过。")
+        logger.info("没有启用的配置，定时任务跳过。")
         return
 
-    try:
-        # --- 使用辅助函数检查 TMDB 连接 ---
-        _check_tmdb_connectivity(configs, task_type="定时任务")
-        # --- 检查通过，继续执行 ---
-    except TMDBError as e: # 捕获所有 TMDB 相关的错误
-        # 日志已在 _check_tmdb_connectivity 中记录
-        logger.warning(f"定时任务因 TMDB 检查失败而终止: {e}")
-        return # 终止任务
-
-    # --- 检查结束 ---
-
-    # 遍历所有配置并执行处理 (没有进度回调)
-    for config_item in configs:
-        config_name = config_item.get('name', '未命名配置')
-        logger.info(f"开始处理配置: {config_name}")
+    if _needs_tmdb(configs):
         try:
-            # 注意：定时任务目前不传递进度回调
-            process_movies(config_item) # 传递单个配置项
-            logger.info(f"配置 '{config_name}' 处理完成。")
-        except Exception as e:
-            logger.error(f"处理配置 '{config_name}' 时出错: {e}", exc_info=True)
+            _check_tmdb_connectivity(configs, task_type="定时任务")
+        except TMDBError as e:
+            logger.warning(f"定时任务因 TMDB 检查失败而终止：{e}")
+            return
 
+    for config_item in configs:
+        name = config_item.get("name", "未命名配置")
+        try:
+            process_movies(config_item)
+            logger.info(f"配置 '{name}' 处理完成。")
+        except Exception as e:
+            logger.error(f"处理配置 '{name}' 时出错：{e}", exc_info=True)
     logger.info("定时任务执行完毕。")
 
 
 def start_scheduler(interval_minutes=0):
-    """启动或更新调度器"""
-    global scheduler
-    # 移除旧任务
     if scheduler.get_jobs():
         scheduler.remove_all_jobs()
         logger.info("旧的定时任务已移除。")
-
-    # 如果设置了有效间隔，则添加新任务
-    # 注意：这里的 interval_minutes 决定了任务运行的频率，
-    # 但任务本身会处理所有配置。通常使用第一个配置的间隔，
-    # 或者提供一个全局的调度间隔设置。
-    if interval_minutes > 0:
-        # Ensure it calls run_scheduled_task
-        scheduler.add_job(run_scheduled_task, 'interval', minutes=interval_minutes, id='movie_scan_job', replace_existing=True)
-        logger.info(f"定时任务已启动，每 {interval_minutes} 分钟执行一次。")
-        # 立即运行一次（可选）
-        # run_scheduled_task()
+    try:
+        interval = int(interval_minutes or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    if interval > 0:
+        scheduler.add_job(run_scheduled_task, "interval", minutes=interval,
+                          id="movie_scan_job", replace_existing=True)
+        logger.info(f"定时任务已启动，每 {interval} 分钟执行一次。")
     else:
         logger.info("未设置有效的执行间隔，定时任务未启动。")
 
-# wrapper，将进度回调传给 process_movies
-def run_process_wrapper(cfg):
-    def progress_cb(event, value, success=True, error_info=None):
-        if event == "initialize":
-            progress["total"] = value
-            progress["processed"] = 0
-            progress["success"] = 0
-            progress["failed"] = 0
-            progress["completed"] = False
-            progress["errors"] = []  # 清空错误列表
-        elif event == "update":
-            progress["processed"] += 1
-            if success:
-                progress["success"] += 1
-            else:
-                progress["failed"] += 1
-                if error_info:
-                    progress["errors"].append(error_info)
-        elif event == "complete":
-            progress["completed"] = True
 
+def run_all_configs_sequentially_wrapper():
+    """顺序处理所有启用的配置，汇总进度。"""
+    configs = [cfg for cfg in load_config() if cfg.get("enabled", True)]
     try:
-        process_movies(cfg, progress_callback=progress_cb)
+        if not configs:
+            logger.info("没有启用的配置，任务跳过。")
+            _progress_update(stage="没有启用的配置")
+            return
+
+        total = 0
+        for cfg in configs:
+            try:
+                total += len(collect_tasks(cfg))
+            except Exception as e:
+                logger.warning(f"预估配置 '{cfg.get('name', '未命名')}' 文件数失败：{e}")
+        _progress_update(total=total)
+
+        for i, cfg in enumerate(configs):
+            name = cfg.get("name", f"配置 {i + 1}")
+            logger.info(f"开始顺序处理配置 {i + 1}/{len(configs)}：{name}")
+            _progress_update(current_config=name)
+            callback = make_progress_callback(config_name=name,
+                                              reset_on_initialize=False)
+            try:
+                process_movies(cfg, progress_callback=callback)
+            except Exception as e:
+                logger.error(f"配置 '{name}' 执行异常：{e}", exc_info=True)
+                callback("update", 1, False,
+                         {"file": "全局错误", "message": f"配置 {name} 执行异常：{e}"},
+                         action=STATUS_FAILED)
+    finally:
+        _finish_run()
+
+
+def run_single_config_wrapper(name, cfg):
+    try:
+        logger.info(f"开始执行配置：{name}")
+        process_movies(cfg, progress_callback=make_progress_callback(config_name=name))
+        logger.info(f"配置 {name} 执行完成。")
     except Exception as e:
-        error_msg = f"处理电影时出错：{str(e)}"
-        logger.error(error_msg)
-        progress["completed"] = True
-        progress["errors"].append({
-            "file": "全局错误",
-            "message": error_msg
-        })
+        logger.error(f"执行配置 {name} 时发生错误：{e}", exc_info=True)
+        with progress_lock:
+            progress["failed"] += 1
+            progress["errors"].append({"file": "全局错误", "config_name": name,
+                                       "message": str(e)})
+    finally:
+        _finish_run()
 
-    # try:
-    #     process_movies(cfg, progress_callback=progress_cb)
-    # except Exception as e:
-    #     logger.error(f"处理电影时出错：{e}")
 
-# --- 自定义异常 ---
-class TMDBError(Exception):
-    """Base exception for TMDB related errors."""
-    pass
-
-class TMDBConnectionError(TMDBError):
-    """Raised when connection to TMDB fails."""
-    pass
-
-class TMDBApiKeyMissingError(TMDBError):
-    """Raised when TMDB API Key is missing in config."""
-    pass
-
+# ---------------------------------------------------------------------------
+# 路由
+# ---------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def config_page():
+    return render_template("index.html", configs=load_config(), progress=_progress_snapshot())
+
+
+@app.route("/configs", methods=["GET"])
+def list_configs():
     configs = load_config()
-    return render_template("index.html", configs=configs)
+    for cfg in configs:
+        cfg["api_key_configured"] = bool(cfg.get("tmdb_api_key"))
+        cfg.pop("tmdb_api_key", None)
+    return jsonify(configs)
+
 
 @app.route("/save_config", methods=["POST"])
 def save_config_route():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"message": "配置名称不能为空"}), 400
+
+    paths = [
+        {"source": (p.get("source") or "").strip(), "target": (p.get("target") or "").strip()}
+        for p in (data.get("paths") or [])
+    ]
+    paths = [p for p in paths if p["source"] and p["target"]]
+    if not paths:
+        return jsonify({"message": "至少需要一组有效的路径映射（源路径 + 目标路径）"}), 400
+
+    # 后缀留空 -> 使用默认后缀，不再报错
+    suffixes = normalize_suffixes(data.get("file_suffixes"))
+
     configs = load_config()
-    existing = next((c for c in configs if c["name"] == data["name"]), None)
+    existing = next((c for c in configs if c.get("name") == name), None)
     entry = {
-        "name": data["name"],
-        "file_type": data.get("file_type", "movie"), # <--- 确保获取 file_type
-        "file_suffixes": data["file_suffixes"],
-        "tmdb_api_key": data["tmdb_api_key"],
-        "paths": data["paths"],
-        "rename_rule": data.get("rename_rule", ""), # 允许空规则
-        "schedule_interval": data.get("schedule_interval", 0),
-        "max_threads": data.get("max_threads", 4), # 可以考虑添加线程数配置
-        "scrape_metadata": data.get('scrape_metadata', True),
-        "rename_file": data.get('rename_file', True)
+        "name": name,
+        "file_type": data.get("file_type", "movie"),
+        "file_suffixes": suffixes,
+        "tmdb_api_key": (data.get("tmdb_api_key") or "").strip(),
+        "paths": paths,
+        "rename_rule": data.get("rename_rule", ""),
+        "schedule_interval": int(data.get("schedule_interval") or 0),
+        "max_threads": int(data.get("max_threads") or 4),
+        "scrape_metadata": bool(data.get("scrape_metadata", True)),
+        "rename_file": bool(data.get("rename_file", True)),
+        "link_mode": data.get("link_mode", "hardlink"),
+        "fix_permissions": bool(data.get("fix_permissions", True)),
+        "dir_mode": mode_to_string(parse_mode(data.get("dir_mode"), DEFAULT_DIR_MODE)),
+        "file_mode": mode_to_string(parse_mode(data.get("file_mode"), DEFAULT_FILE_MODE)),
+        "enabled": bool(data.get("enabled", existing.get("enabled", True) if existing else True)),
     }
     if existing:
         existing.update(entry)
     else:
         configs.append(entry)
-    save_config(configs)
-    # 重新启动定时器 (如果需要基于第一个配置的间隔)
+
+    if not save_config(configs):
+        return jsonify({"message": "配置保存失败，请检查日志与目录权限"}), 500
+
     if configs:
         start_scheduler(configs[0].get("schedule_interval", 0))
     else:
-         scheduler.remove_all_jobs() # 没有配置则停止定时器
+        scheduler.remove_all_jobs()
     return jsonify({"message": "配置保存成功！"})
+
 
 @app.route("/delete_config/<name>", methods=["DELETE"])
 def delete_config_route(name):
     configs = load_config()
-    new_configs = [c for c in configs if c["name"] != name]
+    new_configs = [c for c in configs if c.get("name") != name]
     if len(new_configs) == len(configs):
         return jsonify({"message": "配置未找到"}), 404
-    save_config(new_configs)
-    # 如果删除的是第一个配置，需要重启定时器
+    if not save_config(new_configs):
+        return jsonify({"message": "删除失败，请检查日志"}), 500
     if new_configs:
         start_scheduler(new_configs[0].get("schedule_interval", 0))
     else:
         scheduler.remove_all_jobs()
-    return jsonify({"message": "删除成功"})
+    return jsonify({"message": f"配置 '{name}' 已删除"})
+
 
 @app.route("/get_config/<name>", methods=["GET"])
 def get_config_route(name):
-    configs = load_config()
-    cfg = next((c for c in configs if c["name"] == name), None)
+    cfg = next((c for c in load_config() if c.get("name") == name), None)
     if not cfg:
         return jsonify({"message": "配置未找到"}), 404
     return jsonify(cfg)
 
-# wrapper for single config processing with progress (used by the new multi-config wrapper)
-def run_single_config_wrapper(cfg, progress_callback):
-    config_name = cfg.get('name', '未命名配置')
-    logger.info(f"开始处理单个配置: {config_name}")
-    try:
-        process_movies(cfg, progress_callback=progress_callback)
-        logger.info(f"单个配置 '{config_name}' 处理完成。")
-    except Exception as e:
-        error_msg = f"处理配置 '{config_name}' 时出错：{str(e)}"
-        logger.error(error_msg, exc_info=True)
-        # Notify progress callback about the error if possible
-        if progress_callback:
-             try:
-                 # Attempt to report a generic error for this config run
-                 progress_callback("update", None, success=False, error_info={"file": f"配置 {config_name} 出错", "message": error_msg})
-                 progress_callback("complete", None) # Mark as complete even on error
-             except Exception as cb_e:
-                 logger.error(f"调用进度回调时出错: {cb_e}")
 
-
-def estimate_file_count(cfg):
-    """预估某个配置下要处理的文件总数"""
-    count = 0
-    suffixes = [s.strip() for s in cfg.get("file_suffixes", "").split(",") if s.strip()]
-    for path in cfg.get("paths", []):
-        src = path.get("source")
-        if not src or not os.path.exists(src):
-            continue
-        for root, _, files in os.walk(src):
-            for file in files:
-                if any(file.endswith(suffix) for suffix in suffixes):
-                    count += 1
-    return count
-
-# New wrapper to run all configs sequentially with combined progress
-def run_all_configs_sequentially_wrapper():
-    """按顺序处理所有配置，并在全局 progress 对象中报告累积进度"""
-    global progress
-    configs = [cfg for cfg in load_config() if cfg.get("enabled", True)]
-    if not configs:
-        logger.info("没有启用的配置，任务跳过。")
-        progress.update({
-            "total": 0, "processed": 0, "success": 0, "failed": 0,
-            "completed": True, "errors": []
-        })
-        return
-
-
-    # 初始化
-    progress["completed"] = False
-    progress["total"] = 0
-    progress["processed"] = 0
-    progress["success"] = 0
-    progress["failed"] = 0
-    progress["errors"] = []
-
-    # 第一阶段：预估所有配置总任务数
-    for cfg in configs:
-        try:
-            count = estimate_file_count(cfg)
-            progress["total"] += count
-        except Exception as e:
-            logger.warning(f"预估配置 '{cfg.get('name', '未命名')}' 文件数失败：{e}")
-
-    # 第二阶段：正式执行处理
-    def create_progress_callback(config_index):
-        """返回某配置的 progress 回调函数"""
-        def progress_cb(event, value, success=True, error_info=None):
-            if event == "initialize":
-                pass  # 已预估，无需再增加 total
-            elif event == "update":
-                progress["processed"] += 1
-                if success:
-                    progress["success"] += 1
-                else:
-                    progress["failed"] += 1
-                    if error_info:
-                        error_info["config_name"] = configs[config_index].get('name', f'配置 {config_index+1}')
-                        progress["errors"].append(error_info)
-        return progress_cb
-
-    for i, cfg in enumerate(configs):
-        config_name = cfg.get("name", f"配置 {i+1}")
-        logger.info(f"开始顺序处理配置 {i+1}/{len(configs)}: {config_name}")
-        cb = create_progress_callback(i)
-        try:
-            process_movies(cfg, progress_callback=cb)
-            logger.info(f"配置 '{config_name}' 处理完成。")
-        except Exception as e:
-            logger.error(f"配置 '{config_name}' 执行异常: {e}", exc_info=True)
-            cb("update", None, success=False, error_info={"file": "全局错误", "message": str(e)})
-
-    progress["completed"] = True
-    logger.info("所有配置处理完毕。")
+@app.route("/toggle_config/<name>", methods=["POST"])
+def toggle_config_enabled(name):
+    data = request.get_json(silent=True) or {}
+    configs = load_config()
+    cfg = next((c for c in configs if c.get("name") == name), None)
+    if not cfg:
+        return jsonify({"message": "配置未找到"}), 404
+    cfg["enabled"] = bool(data.get("enabled", True))
+    if not save_config(configs):
+        return jsonify({"message": "保存失败，请检查日志"}), 500
+    return jsonify({"message": f"配置 '{name}' 已{'启用' if cfg['enabled'] else '停用'}"})
 
 
 @app.route("/run_task", methods=["POST"])
 def run_task():
-    """手动触发任务，顺序处理所有启用的配置"""
-    global progress
-    configs = load_config()
+    """手动触发任务：顺序处理所有启用的配置。"""
+    configs = [cfg for cfg in load_config() if cfg.get("enabled", True)]
     if not configs:
-        return jsonify({"message": "没有可用的配置"}), 400
-
-    enabled_configs = [cfg for cfg in configs if cfg.get("enabled", True)]
-
-    if not enabled_configs:
         return jsonify({"message": "没有启用的配置"}), 400
 
-    # 判断是否至少有一个配置启用了抓取元数据或重命名
-    need_tmdb_check = any(
-        cfg.get("scrape_metadata", True) or cfg.get("rename_file", True)
-        for cfg in enabled_configs
-    )
+    if not _begin_run(stage="检查 TMDB 连接..."):
+        return jsonify({"message": "已有任务正在运行，请等待当前任务结束"}), 409
 
-    if need_tmdb_check:
+    if _needs_tmdb(configs):
         try:
-            _check_tmdb_connectivity(enabled_configs, task_type="手动任务")
-        except (TMDBConnectionError, TMDBApiKeyMissingError) as e:
-            return jsonify({"message": str(e)}), 503
+            _check_tmdb_connectivity(configs, task_type="手动任务")
         except TMDBError as e:
-            logger.error(f"TMDB 检查时发生未知错误: {e}", exc_info=True)
-            return jsonify({"message": f"TMDB 检查时发生未知错误: {e}"}), 500
+            _abort_run(str(e))
+            return jsonify({"message": str(e)}), 503
 
-    # 初始化进度对象
-    progress.update({
-        "total": 0,
-        "processed": 0,
-        "success": 0,
-        "failed": 0,
-        "completed": False,
-        "errors": []
-    })
-
-    # 启动任务线程
-    thread = Thread(target=run_all_configs_sequentially_wrapper)
-    thread.start()
+    _progress_update(stage="扫描文件中...")
+    threading.Thread(target=run_all_configs_sequentially_wrapper, daemon=True).start()
     return jsonify({"message": "任务已启动，将按顺序处理所有配置。"}), 202
+
+
+@app.route("/run_config/<name>", methods=["POST"])
+def run_single_config(name):
+    cfg = next((c for c in load_config()
+                if c.get("name") == name and c.get("enabled", True)), None)
+    if not cfg:
+        return jsonify({"message": f"未找到启用的配置：{name}"}), 404
+
+    if not _begin_run(stage=f"准备执行配置 {name}..."):
+        return jsonify({"message": "已有任务正在运行，请等待当前任务结束"}), 409
+
+    if cfg.get("scrape_metadata", True):
+        try:
+            _check_tmdb_connectivity([cfg], task_type=f"配置 {name}")
+        except TMDBError as e:
+            _abort_run(str(e))
+            return jsonify({"message": str(e)}), 503
+
+    _progress_update(current_config=name, stage="扫描文件中...")
+    threading.Thread(target=run_single_config_wrapper, args=(name, cfg),
+                     daemon=True).start()
+    return jsonify({"message": f"配置 {name} 已启动"}), 202
 
 
 @app.route("/progress", methods=["GET"])
 def get_progress():
-    # 使用全局变量中的日志路径
-    return jsonify(progress)
+    snapshot = _progress_snapshot()
+    if snapshot.get("started_at") and snapshot.get("finished_at"):
+        snapshot["elapsed"] = round(snapshot["finished_at"] - snapshot["started_at"], 1)
+    elif snapshot.get("started_at"):
+        snapshot["elapsed"] = round(time.time() - snapshot["started_at"], 1)
+    else:
+        snapshot["elapsed"] = 0
+    return jsonify(snapshot)
 
-@app.route("/toggle_config/<name>", methods=["POST"])
-def toggle_config_enabled(name):
-    configs = load_config()
-    cfg = next((c for c in configs if c["name"] == name), None)
+
+@app.route("/clear_processed", methods=["POST"])
+def clear_processed_route():
+    try:
+        count = clear_processed()
+    except Exception as e:
+        logger.error(f"清空处理记录失败：{e}")
+        return jsonify({"message": f"清空处理记录失败：{e}"}), 500
+    return jsonify({"message": f"已清空 {count} 条处理记录，下次执行将重新扫描全部文件"})
+
+
+@app.route("/processed", methods=["GET"])
+def processed_route():
+    """处理记录状态（路径 / 条数 / 更新时间），用于确认记录是否持久化。"""
+    return jsonify(processed_stats())
+
+
+@app.route("/fix_permissions/<name>", methods=["POST"])
+def fix_permissions_route(name):
+    """对某个配置的目标目录做一次性递归权限修正（批量 chmod，不逐文件递归）。"""
+    cfg = next((c for c in load_config() if c.get("name") == name), None)
     if not cfg:
         return jsonify({"message": "配置未找到"}), 404
 
-    data = request.get_json()
-    cfg["enabled"] = data.get("enabled", True)
-    save_config(configs)
-    return jsonify({"message": f"配置 '{name}' 启用状态已更新为 {cfg['enabled']}"}), 200
+    targets = [p.get("target") for p in cfg.get("paths", []) if p.get("target")]
+    if not targets:
+        return jsonify({"message": "该配置没有目标目录"}), 400
+    missing = [t for t in targets if not os.path.isdir(t)]
+    if len(missing) == len(targets):
+        return jsonify({"message": "目标目录不存在，请检查路径映射"}), 400
 
-@app.route("/run_config/<name>", methods=["POST"])
-def run_single_config(name):
-    """执行指定配置"""
-    global progress
-    all_configs = load_config()
-    cfg = next((c for c in all_configs if c.get("name") == name and c.get("enabled", True)), None)
-    if not cfg:
-        return jsonify({"message": f"未找到启用的配置：{name}"}), 404
+    # 允许请求体临时覆盖权限值，便于先试后存
+    data = request.get_json(silent=True) or {}
+    dir_mode = parse_mode(data.get("dir_mode") or cfg.get("dir_mode"), DEFAULT_DIR_MODE)
+    file_mode = parse_mode(data.get("file_mode") or cfg.get("file_mode"), DEFAULT_FILE_MODE)
 
-    if cfg.get("scrape_metadata", True) or cfg.get("rename_file", True):
-        try:
-            _check_tmdb_connectivity([cfg], task_type=f"配置 {name}")
-        except TMDBError as e:
-            return jsonify({"message": str(e)}), 503
-
-    # 初始化进度
-    progress.update({
-        "total": 0,
-        "processed": 0,
-        "success": 0,
-        "failed": 0,
-        "completed": False,
-        "errors": []
+    started = time.time()
+    logger.info(f"开始修正配置 '{name}' 的目录权限：{mode_to_string(dir_mode)} / "
+                f"{mode_to_string(file_mode)}")
+    stats = apply_permission_tree(targets, dir_mode, file_mode)
+    elapsed = round(time.time() - started, 2)
+    logger.info(f"权限修正完成：{stats}")
+    return jsonify({
+        "message": (f"已修正 {stats['dirs']} 个目录、{stats['files']} 个文件"
+                    f"（{mode_to_string(dir_mode)} / {mode_to_string(file_mode)}），"
+                    f"耗时 {elapsed}s"),
+        "stats": stats,
+        "elapsed": elapsed,
     })
-
-    # 定义回调函数
-    def progress_callback(stage, amount, success=None, error=None):
-        if stage == "initialize":
-            progress["total"] = amount
-        elif stage == "update":
-            progress["processed"] += amount
-            if success:
-                progress["success"] += 1
-            else:
-                progress["failed"] += 1
-                if error:
-                    progress["errors"].append(error)
-        elif stage == "complete":
-            progress["completed"] = True
-
-    def run_one():
-        logger.info(f"开始执行配置：{name}")
-        try:
-            process_movies(cfg, progress_callback=progress_callback)
-        except Exception as e:
-            logger.error(f"执行配置 {name} 时发生错误：{e}", exc_info=True)
-            progress["completed"] = True
-        logger.info(f"配置 {name} 执行完成")
-
-    Thread(target=run_one).start()
-    return jsonify({"message": f"配置 {name} 已启动"}), 202
 
 
 @app.route("/stats", methods=["GET"])
 def media_stats():
-    stats = {
-        "movie": 0,
-        "tv_show": 0,
-        "unknown": 0,
-        "size": {
-            "movie": 0,
-            "tv_show": 0,
-            "unknown": 0
-        }
-    }
+    """按「执行时会怎么处理」来分类统计，与 process_single_file 的判定保持一致。
 
+    - 文件名能判断出类型（带年份 / S01E01）：按文件名判断
+    - 判断不出（如 Iron Man.mkv）：用该配置的「媒体类型」兜底，并计入 fallback
+    """
+    stats = {
+        "movie": 0, "tv_show": 0,
+        "fallback": 0,        # 靠配置的媒体类型兜底的文件数（文件名缺年份/季集）
+        "size": {"movie": 0, "tv_show": 0},
+        "unreadable": 0,      # 文件存在但读不到大小（断链软链接 / 挂载失效 / 权限不足）
+        "empty": 0,           # 0 字节的空文件
+    }
     try:
-        configs = load_config()
-        for cfg in configs:
-            paths = cfg.get("paths", [])
-            suffixes = [s.strip().lower() for s in cfg.get("file_suffixes", "").split(",") if s.strip()]
-            for mapping in paths:
+        for cfg in load_config():
+            suffixes = suffix_set(cfg.get("file_suffixes"))
+            config_type = cfg.get("file_type", "movie")
+            if config_type not in ("movie", "tv_show"):
+                config_type = "movie"
+
+            for mapping in cfg.get("paths", []):
                 target = mapping.get("target")
-                if not target or not os.path.exists(target):
+                if not target or not os.path.isdir(target):
                     continue
                 for root, _, files in os.walk(target):
                     for file in files:
                         if not any(file.lower().endswith(s) for s in suffixes):
                             continue
                         try:
-                            file_path = os.path.join(root, file)
                             info = parse_filename(file)
-                            media_type = info.get("type", "unknown")
-                            stats[media_type] = stats.get(media_type, 0) + 1
-                            stats["size"][media_type] += os.path.getsize(file_path)
-                        except Exception as e:
-                            print(f"统计目标路径时解析文件 {file} 出错：{e}")
+                        except Exception:
+                            info = {}
+
+                        media_type = info.get("type", "unknown")
+                        if media_type in ("movie", "tv_show"):
+                            if media_type != config_type:
+                                # 文件名判断出的类型优先（与执行逻辑一致）
+                                logger.debug(f"{file}：文件名判断为 {media_type}，配置为 {config_type}")
+                        else:
+                            media_type = config_type
+                            stats["fallback"] += 1
+                        stats[media_type] += 1
+
+                        path = os.path.join(root, file)
+                        try:
+                            size = os.path.getsize(path)
+                        except OSError as e:
+                            # 文件在列目录后消失、断链软链接、挂载异常等
+                            stats["unreadable"] += 1
+                            logger.warning(f"无法读取文件大小：{path}（{e}）")
+                            continue
+                        if size == 0:
+                            stats["empty"] += 1
+                        stats["size"][media_type] += size
+        stats["scanned_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return jsonify(stats)
     except Exception as e:
-        print(f"[ERROR] 统计接口异常: {e}")
+        logger.error(f"统计接口异常：{e}")
         return jsonify({"error": str(e)}), 500
 
 
-cfgs = load_config()
-if cfgs:
-    initial_interval = cfgs[0].get("schedule_interval", 0)
-    start_scheduler(initial_interval)
+# APScheduler 在路由定义之后启动，避免导入期副作用
+_cfgs = load_config()
+if _cfgs:
+    start_scheduler(_cfgs[0].get("schedule_interval", 0))
 
-# --- 以下仅供开发时本地调试 ---
+_record_info = processed_stats()
+logger.info(
+    f"处理记录：{_record_info['count']} 条（{_record_info['path']}）"
+    + ("" if _record_info["exists"] else "；文件尚不存在")
+)
+
+# --- 仅本地调试 ---
 if __name__ == "__main__":
-    print("[调试模式] 使用 Flask 自带服务器启动...")
-    app.run(host="0.0.0.0", port=5002, debug=True)
+    debug_port = int(os.getenv("PORT", "5002"))
+    print(f"[调试模式] Flask 自带服务器启动：http://127.0.0.1:{debug_port}/")
+    app.run(host="0.0.0.0", port=debug_port, debug=True)
