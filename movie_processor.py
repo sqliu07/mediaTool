@@ -77,31 +77,81 @@ STATUS_FAILED = "failed"
 _processed_lock = threading.Lock()
 
 
-def processed_key(file_path, target_dir):
-    """处理记录的键：源文件 + 目标目录，支持同一源文件链接到多个目标目录。"""
-    return "{}|{}".format(
+def processed_key(file_path, target_dir, dest_name=None):
+    """处理记录的键：源文件 + 目标目录（+ 最终目标文件名）。"""
+    key = "{}|{}".format(
         file_path.strip(), os.path.normpath(os.path.abspath(target_dir))
     )
+    if dest_name:
+        key += "|" + dest_name
+    return key
+
+
+class ProcessedIndex:
+    """处理记录索引。
+
+    记录格式（每行）：
+        源文件路径|目标目录|最终目标文件名      <- 新格式，可脱离 inode 判断
+        源文件路径|目标目录                     <- 旧格式
+        源文件路径                              <- 更旧的格式
+
+    同一个「源|目标目录」出现多次时，以文件中靠后的那条为准。
+    """
+
+    def __init__(self):
+        self._names = {}    # "源|目标目录" -> 目标文件名（'' 表示旧格式没有文件名）
+        self._paths = set()  # 只记录源路径的老记录
+
+    def add_line(self, line):
+        parts = line.split("|")
+        if len(parts) >= 3:
+            self._names["{}|{}".format(parts[0], parts[1])] = "|".join(parts[2:])
+        elif len(parts) == 2:
+            self._names["{}|{}".format(parts[0], parts[1])] = ""
+        else:
+            self._paths.add(parts[0])
+
+    def __contains__(self, item):
+        return item in self._names or item in self._paths
+
+    def __len__(self):
+        return len(self._names) + len(self._paths)
+
+    def dest_name(self, file_path, target_dir):
+        """返回记录里的目标文件名：'' 表示旧格式，None 表示没有记录。"""
+        base = "{}|{}".format(
+            file_path.strip(), os.path.normpath(os.path.abspath(target_dir))
+        )
+        if base in self._names:
+            return self._names[base]
+        if file_path.strip() in self._paths:
+            return ""
+        return None
 
 
 def load_processed_set():
-    """读取 configs/processed.txt 返回集合（兼容旧的“只有路径”的记录格式）。"""
+    """读取 configs/processed.txt，返回 ProcessedIndex。"""
+    index = ProcessedIndex()
     if not os.path.exists(PROCESSED_FILE):
-        return set()
+        return index
     try:
         with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
-            return {line.strip() for line in f if line.strip()}
+            for line in f:
+                line = line.strip()
+                if line:
+                    index.add_line(line)
     except OSError as e:
         logger.warning(f"读取处理记录失败：{e}")
-        return set()
+    return index
 
 
 def is_processed(processed_set, file_path, target_dir):
     if processed_set is None:
         return False
+    if hasattr(processed_set, "dest_name"):
+        return processed_set.dest_name(file_path, target_dir) is not None
     if processed_key(file_path, target_dir) in processed_set:
         return True
-    # 兼容旧记录：只记录了源文件路径
     return file_path.strip() in processed_set
 
 
@@ -123,14 +173,19 @@ def _flush_records_locked():
         logger.warning(f"写入处理记录失败：{e}")
 
 
-def record_processed(file_path, target_dir, processed_set=None):
+def record_processed(file_path, target_dir, processed_set=None, dest_name=None):
     """记录一个文件已处理（线程安全，批量落盘）。
 
-    若该记录本次运行的文件里已经存在（例如目标丢失后重建），则不重复写入。
+    dest_name 记录最终的目标文件名：下次运行即使 inode 变了（媒体库重新挂载、
+    文件被复制替换），只要文件还在原处就能直接判定为已处理。
     """
-    if processed_set is not None and is_processed(processed_set, file_path, target_dir):
-        return
-    line = processed_key(file_path, target_dir)
+    if processed_set is not None:
+        existing = (processed_set.dest_name(file_path, target_dir)
+                    if hasattr(processed_set, "dest_name")
+                    else ("" if is_processed(processed_set, file_path, target_dir) else None))
+        if existing is not None and existing == (dest_name or ""):
+            return                      # 记录已存在且一致，不重复写
+    line = processed_key(file_path, target_dir, dest_name)
     with _processed_lock:
         _pending_records.append(line)
         if len(_pending_records) >= _PENDING_FLUSH_SIZE:
@@ -757,18 +812,31 @@ def process_single_file(file_path, config, rel_dir, target_dir,
     policy = PermissionPolicy.from_config(config)
     mode = normalize_link_mode(config.get("link_mode"))
     try:
-        if is_processed(processed_set, file_path, dest_dir):
-            # 记录说处理过，但目标目录里的链接可能已被手动删除/改名：
-            # 硬链接模式下用 inode 复核一次，目标真的不在了就重新处理。
-            if mode == LINK_MODE_HARDLINK and not _has_link_in(
-                file_path, dest_dir, index, target_dir
-            ):
-                logger.info(
-                    f"[配置:{config_name}] 处理记录存在但目标链接已丢失，重新处理：{file_path}"
-                )
-            else:
-                logger.info(f"[配置:{config_name}] 已处理过，跳过：{file_path}")
+        recorded_name = (processed_set.dest_name(file_path, dest_dir)
+                         if hasattr(processed_set, "dest_name")
+                         else ("" if is_processed(processed_set, file_path, dest_dir) else None))
+        if recorded_name is not None:
+            # ① 记录里带了目标文件名：文件还在就跳过，完全不依赖 inode
+            if recorded_name and os.path.exists(os.path.join(dest_dir, recorded_name)):
+                logger.info(f"[配置:{config_name}] 已处理过（{recorded_name}），跳过：{file_path}")
                 return FileOutcome(STATUS_SKIPPED, "已处理过，跳过")
+
+            # ② 文件名对不上（被外部工具改过名）：按同 inode -> 全库同 inode -> 内容一致 复核
+            existing, reason = index.find_duplicate(file_path, dest_dir, target_dir)
+            if existing:
+                index.remember(existing)
+                record_processed(file_path, dest_dir, processed_set,
+                                 dest_name=os.path.basename(existing))
+                logger.info(
+                    f"[配置:{config_name}] 已处理过（目标里已存在：{os.path.basename(existing)}，"
+                    f"{'同 inode' if reason.startswith('inode') else '内容一致'}），跳过：{file_path}"
+                )
+                return FileOutcome(STATUS_SKIPPED, "已处理过，跳过")
+
+            # ③ 真的找不到，才重建
+            logger.info(
+                f"[配置:{config_name}] 处理记录存在但目标文件确实已不存在，重新处理：{file_path}"
+            )
 
         link = create_link(
             file_path, dest_dir, config_name,
@@ -780,7 +848,8 @@ def process_single_file(file_path, config, rel_dir, target_dir,
         if not link.ok:
             return FileOutcome(STATUS_FAILED, link.message)
         if link.duplicate:
-            record_processed(file_path, dest_dir, processed_set)
+            record_processed(file_path, dest_dir, processed_set,
+                             dest_name=os.path.basename(link.path) if link.path else None)
             return FileOutcome(STATUS_SKIPPED, link.message, link.action)
 
         created_path = link.path
@@ -794,7 +863,8 @@ def process_single_file(file_path, config, rel_dir, target_dir,
 
         # 既不刮削也不重命名：只建链接
         if not scrape and not do_rename:
-            record_processed(file_path, dest_dir, processed_set)
+            record_processed(file_path, dest_dir, processed_set,
+                             dest_name=os.path.basename(dest_path))
             return FileOutcome(STATUS_SUCCESS, "仅建立链接", link.action)
 
         file_info = parse_filename(filename, config_media_type)
@@ -879,7 +949,8 @@ def process_single_file(file_path, config, rel_dir, target_dir,
 
             _apply_asset_permissions(dest_dir, base_name_no_ext, policy)
 
-        record_processed(file_path, dest_dir, processed_set)
+        record_processed(file_path, dest_dir, processed_set,
+                         dest_name=os.path.basename(dest_path))
         return FileOutcome(STATUS_SUCCESS, "", link.action)
 
     except Exception as e:

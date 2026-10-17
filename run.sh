@@ -8,6 +8,7 @@
 #   ./run.sh logs         实时查看日志（Ctrl+C 退出）
 #   ./run.sh debug        调试模式前台运行（默认端口 5002，改代码自动重载）
 #   ./run.sh install      安装 / 更新依赖
+#   ./run.sh doctor       诊断处理记录与目标库状态（排查重复文件）
 #
 # 可覆盖的环境变量：
 #   PORT=5001  HOST=0.0.0.0  THREADS=8  VENV=.venv  DEBUG_PORT=5002
@@ -224,6 +225,11 @@ cmd_debug() {
     exec env PORT="$DEBUG_PORT" "$VENV/bin/python" app.py
 }
 
+cmd_doctor() {
+    ensure_deps
+    "$VENV/bin/python" tools/doctor.py "$@"
+}
+
 cmd_install() {
     ensure_venv
     info "安装 / 更新依赖..."
@@ -233,7 +239,9 @@ cmd_install() {
 }
 
 # ---------------------------------------------------------------- 入口
-case "${1:-start}" in
+COMMAND="${1:-start}"
+shift || true
+case "$COMMAND" in
     start|run)    cmd_start ;;
     stop)         cmd_stop ;;
     restart)      cmd_restart ;;
@@ -241,9 +249,10 @@ case "${1:-start}" in
     logs|log)     cmd_logs ;;
     debug|dev)    cmd_debug ;;
     install|deps) cmd_install ;;
+    doctor)       cmd_doctor "$@" ;;
     -h|--help|help) usage ;;
     *)
-        warn "未知命令：$1"
+        warn "未知命令：$COMMAND"
         usage
         exit 1
         ;;
